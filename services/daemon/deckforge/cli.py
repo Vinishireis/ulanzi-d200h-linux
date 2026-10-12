@@ -1,5 +1,6 @@
 from __future__ import annotations
 import argparse
+import errno
 import json
 import sys
 import time
@@ -8,14 +9,16 @@ import subprocess
 import tempfile
 import webbrowser
 import signal
-from urllib.error import URLError
-from urllib.request import urlopen
 from pathlib import Path
+from . import build_id
 from .device import capture_profile, doctor, discover
-from .daemon import control_nodes, daemon_status, read_events, run_forever
+from .daemon import control_nodes, daemon_status, read_events, run_action, run_forever
 from .keyboard import keyboard_nodes, read_key_events
+from .processes import api_status, die_with_parent, find_processes, pid_alive, port_in_use, terminate
 from .store import DATA_HOME, ProfileStore
 from .transport import HidTransport
+
+SLOTS = [f"{r}_{c}" for r in range(3) for c in range(5) if not (r == 2 and c > 2)]
 
 def main():
     parser = argparse.ArgumentParser(prog="deckforge", description="Gerencie o Ulanzi D200H no Linux")
@@ -32,9 +35,17 @@ def main():
     diagnose.add_argument("--export", nargs="?", const="deckforge-diagnose.json", help="caminho de exportação JSON")
     daemon = sub.add_parser("daemon", help="executar ações de perfil ao receber eventos físicos")
     daemon.add_argument("--intercept-keyboard", action="store_true", default=None, help="forçar captura dos macros do teclado (modo automático é recomendado)")
+    daemon.add_argument("--parent-pid", type=int, default=None, help=argparse.SUPPRESS)
     sub.add_parser("serve", help="iniciar editor, API local e daemon de ações")
     sub.add_parser("app", help="abrir o editor e iniciar o daemon local de ações")
     sub.add_parser("stop", help="parar somente os processos DeckForge do usuário atual")
+    sub.add_parser("restart", help="parar instâncias antigas e iniciar editor, API e daemon com o código atual")
+    sub.add_parser("status", help="mostrar dispositivo, captura, backend de atalhos e última ação")
+    logs = sub.add_parser("logs", help="mostrar o histórico de eventos do DeckForge")
+    logs.add_argument("-n", "--lines", type=int, default=30, help="quantidade de eventos recentes")
+    logs.add_argument("-f", "--follow", action="store_true", help="acompanhar novos eventos até Ctrl+C")
+    trigger = sub.add_parser("trigger", help="executar a ação salva de uma posição sem usar o dispositivo (teste de software)")
+    trigger.add_argument("slot", choices=SLOTS, help="posição no formato linha_coluna, por exemplo 0_0")
     args = parser.parse_args()
     if args.command == "listen" and args.grab and not args.keyboard:
         parser.error("--grab requer --keyboard")
@@ -68,6 +79,8 @@ def main():
         if not nodes:
             interface = "de teclado" if args.keyboard else "de controle HID"
             print(f"Interface {interface} do D200H não acessível para leitura. Revise a regra udev e reconecte o dispositivo.", file=sys.stderr); return 2
+        if args.keyboard and daemon_status()["running"]:
+            print("Aviso: o daemon DeckForge está ativo e isola o teclado do D200H; esta captura não receberá teclas. Rode `deckforge stop` antes.", file=sys.stderr)
         end = time.monotonic() + args.seconds if args.seconds else None
         label = "teclado" if args.keyboard else "controle HID"
         grab_note = " (isolado temporariamente)" if args.grab else ""
@@ -86,93 +99,189 @@ def main():
                 for event in read_events(nodes[0]["path"], stop):
                     print(json.dumps(event, ensure_ascii=False), flush=True)
         except KeyboardInterrupt: pass
+        except OSError as exc:
+            if exc.errno == errno.EBUSY:
+                print("Outro processo já isolou o teclado do D200H (provavelmente o daemon DeckForge). Rode `deckforge stop` e tente novamente.", file=sys.stderr)
+                return 2
+            raise
         return 0
-    if args.command == "daemon": run_forever(ProfileStore(), intercept_keyboard=args.intercept_keyboard); return 0
+    if args.command == "daemon":
+        try:
+            run_forever(ProfileStore(), intercept_keyboard=args.intercept_keyboard, parent_pid=args.parent_pid)
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr); return 2
+        return 0
     if args.command == "stop":
-        try:
-            subprocess.run(["systemctl", "--user", "stop", "deckforge-daemon.service"],
-                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           timeout=5, check=False)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-        current_pid = os.getpid()
-        targets: list[int] = []
-        for entry in Path("/proc").iterdir():
-            if not entry.name.isdigit() or int(entry.name) == current_pid:
-                continue
-            try:
-                if entry.stat().st_uid != os.getuid():
-                    continue
-                argv = [part.decode(errors="replace") for part in (entry / "cmdline").read_bytes().split(b"\0") if part]
-            except (OSError, ProcessLookupError):
-                continue
-            if "deckforge.cli" not in argv and not any(Path(part).name == "deckforge" for part in argv):
-                continue
-            if not any(arg in {"serve", "app", "daemon"} for arg in argv):
-                continue
-            targets.append(int(entry.name))
-        for pid in targets:
-            try: os.kill(pid, signal.SIGTERM)
-            except ProcessLookupError: pass
-        deadline = time.monotonic() + 3
-        while targets and time.monotonic() < deadline:
-            targets = [pid for pid in targets if Path(f"/proc/{pid}").exists()]
-            if targets: time.sleep(.1)
-        if targets:
-            print(f"DeckForge recebeu SIGTERM; ainda finalizando PID(s): {', '.join(map(str, targets))}.", flush=True)
-        else:
-            print("Processos DeckForge do usuário encerrados.", flush=True)
-        return 0
+        return _stop()
+    if args.command == "restart":
+        if _stop() != 0:
+            return 1
+        return _serve(open_browser=False)
     if args.command in {"serve", "app"}:
-        try:
-            import uvicorn
-        except ImportError:
-            print("Instale dependências com `python -m pip install -e .`", file=sys.stderr); return 2
-        try:
-            with urlopen("http://127.0.0.1:8765/api/status", timeout=.4) as response:
-                running_api = response.status == 200
-        except (URLError, TimeoutError, OSError):
-            running_api = False
-        if running_api:
+        return _serve(open_browser=args.command == "app")
+    if args.command == "status":
+        from .status import collect_status
+        report = collect_status(ProfileStore(), events=5)
+        report.pop("devices", None)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "logs":
+        return _logs(args.lines, args.follow)
+    if args.command == "trigger":
+        store = ProfileStore()
+        ok, message = run_action(store, args.slot, "teste via `deckforge trigger`")
+        print(("OK: " if ok else "FALHOU: ") + message)
+        return 0 if ok else 1
+
+
+def _stop() -> int:
+    """Stop every DeckForge process of this user and verify nothing is left."""
+    try:
+        subprocess.run(["systemctl", "--user", "stop", "deckforge-daemon.service"],
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=5, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    processes = find_processes()
+    for item in processes:
+        print(f"Encerrando PID {item['pid']} (deckforge {item['role']})", flush=True)
+    result = terminate([item["pid"] for item in processes])
+    for pid in result["killed"]:
+        print(f"PID {pid} não respondeu ao SIGTERM em 5 s e foi finalizado com SIGKILL.", flush=True)
+    problems = []
+    if result["remaining"]:
+        problems.append(f"PID(s) ainda ativos: {', '.join(map(str, result['remaining']))}")
+    if daemon_status()["running"]:
+        problems.append("o lock do daemon continua ocupado")
+    deadline = time.monotonic() + 2
+    while port_in_use() and time.monotonic() < deadline:
+        time.sleep(.1)
+    if port_in_use():
+        problems.append("a porta 127.0.0.1:8765 continua ocupada por outro processo (confira com `ss -ltnp 'sport = :8765'`)")
+    if problems:
+        print("DeckForge não foi totalmente encerrado: " + "; ".join(problems) + ".", file=sys.stderr, flush=True)
+        return 1
+    print("Processos DeckForge do usuário encerrados; porta 8765 e lock do daemon livres." if processes
+          else "Nenhum processo DeckForge ativo; porta 8765 e lock do daemon livres.", flush=True)
+    return 0
+
+
+def _serve(open_browser: bool) -> int:
+    try:
+        import uvicorn
+    except ImportError:
+        print("Instale dependências com `python -m pip install -e .`", file=sys.stderr); return 2
+    current_build = build_id()
+    running_api = api_status()
+    if running_api is not None:
+        if running_api.get("build") == current_build:
             print("DeckForge já está atendendo em http://127.0.0.1:8765.", flush=True)
-            if args.command == "app":
+            if open_browser:
                 webbrowser.open("http://127.0.0.1:8765")
             return 0
-        # Never report a working editor while a legacy daemon silently owns
-        # the lock in non-intercept mode. Reuse the current daemon only when
-        # its mode is known to capture physical keyboard macros.
-        current = daemon_status()
-        if current["running"]:
-            expected = capture_profile()["mode"]
-            running_mode = current.get("mode")
-            if running_mode is None or (running_mode != "auto" and running_mode != expected):
-                print("O daemon ativo é antigo ou usa uma captura incompatível com o dispositivo. Rode `deckforge stop` e depois `deckforge serve` para reiniciá-lo com detecção automática.", file=sys.stderr)
-                return 2
-        if not current["running"]:
-            log_dir = DATA_HOME / "logs"
-            log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-            os.chmod(log_dir, 0o700)
-            daemon_log = (log_dir / "daemon.log").open("a", encoding="utf-8")
-            try:
-                child = subprocess.Popen([sys.executable, "-m", "deckforge.cli", "daemon"],
-                                         stdin=subprocess.DEVNULL, stdout=daemon_log, stderr=subprocess.STDOUT,
-                                         start_new_session=True, close_fds=True)
-            except OSError as exc:
-                print(f"Não foi possível iniciar o daemon de ações: {exc}", file=sys.stderr)
-                return 2
-            finally:
-                daemon_log.close()
-            time.sleep(0.25)
-            if child.poll() is not None:
-                print(f"O daemon encerrou durante a inicialização (código {child.returncode}). Consulte {log_dir / 'daemon.log'}.", file=sys.stderr)
-                return 2
-            print(f"Daemon de ações iniciado (PID {child.pid}); logs em {log_dir / 'daemon.log'}.", flush=True)
+        print(f"Uma instância antiga do DeckForge (PID {running_api.get('pid', 'desconhecido')}) está atendendo em 8765. "
+              "Rode `deckforge restart` para substituí-la pelo código atual.", file=sys.stderr)
+        return 2
+    if port_in_use():
+        print("A porta 127.0.0.1:8765 está ocupada por outro processo. Rode `deckforge stop` ou confira `ss -ltnp 'sport = :8765'`.", file=sys.stderr)
+        return 2
+
+    child = None
+    current = daemon_status()
+    if current["running"]:
+        expected = capture_profile()["mode"]
+        running_mode = current.get("mode")
+        compatible = running_mode == "auto" or running_mode == expected
+        if current.get("build") == current_build and compatible:
+            print(f"Usando daemon DeckForge ativo (PID {current.get('pid')}, modo {running_mode}).", flush=True)
         else:
-            print(f"Usando daemon de interceptação ativo (PID {current.get('pid')}).", flush=True)
-        if args.command == "app":
-            import threading
-            threading.Timer(1.0, lambda: webbrowser.open("http://127.0.0.1:8765")).start()
-        uvicorn.run("deckforge.api:app", host="127.0.0.1", port=8765, log_level="info"); return 0
+            # An outdated or incompatible daemon would keep the keyboard grabbed
+            # with old code; replace it instead of silently reusing it.
+            pid = current.get("pid")
+            print(f"Substituindo daemon antigo (PID {pid}, build {current.get('build') or 'desconhecido'}).", flush=True)
+            if isinstance(pid, int) and pid_alive(pid):
+                terminate([pid], grace=3)
+            if daemon_status()["running"]:
+                print("O daemon antigo não liberou o lock. Rode `deckforge stop` e tente de novo.", file=sys.stderr)
+                return 2
+            current = {"running": False}
+    if not current["running"]:
+        log_dir = DATA_HOME / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(log_dir, 0o700)
+        daemon_log = (log_dir / "daemon.log").open("a", encoding="utf-8")
+        try:
+            # Own session: the terminal's Ctrl+C reaches only `serve`, which then
+            # stops this child itself. PDEATHSIG covers a killed parent.
+            child = subprocess.Popen([sys.executable, "-m", "deckforge.cli", "daemon", "--parent-pid", str(os.getpid())],
+                                     stdin=subprocess.DEVNULL, stdout=daemon_log, stderr=subprocess.STDOUT,
+                                     start_new_session=True, close_fds=True, preexec_fn=die_with_parent)
+        except OSError as exc:
+            print(f"Não foi possível iniciar o daemon de ações: {exc}", file=sys.stderr)
+            return 2
+        finally:
+            daemon_log.close()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and child.poll() is None and daemon_status().get("pid") != child.pid:
+            time.sleep(.1)
+        if child.poll() is not None or daemon_status().get("pid") != child.pid:
+            print(f"O daemon não iniciou (código {child.poll()}). Consulte {log_dir / 'daemon.log'}.", file=sys.stderr)
+            _stop_child(child)
+            return 2
+        print(f"Daemon de ações iniciado (PID {child.pid}); logs em {log_dir / 'daemon.log'}.", flush=True)
+
+    # uvicorn handles SIGTERM gracefully and then re-raises it with the handler
+    # that was installed before it started. With the default handler the process
+    # would die there and skip the cleanup below, orphaning the daemon.
+    def exit_on_signal(signum, _frame):
+        raise SystemExit(128 + signum)
+    signal.signal(signal.SIGTERM, exit_on_signal)
+    signal.signal(signal.SIGHUP, lambda *_: os.kill(os.getpid(), signal.SIGTERM))
+    if open_browser:
+        import threading
+        threading.Timer(1.0, lambda: webbrowser.open("http://127.0.0.1:8765")).start()
+    try:
+        uvicorn.run("deckforge.api:app", host="127.0.0.1", port=8765, log_level="info", timeout_graceful_shutdown=3)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if child is not None:
+            _stop_child(child)
+    return 0
+
+
+def _stop_child(child: subprocess.Popen) -> None:
+    if child.poll() is None:
+        terminate([child.pid], grace=3)
+    try:
+        child.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
+    if child.poll() is None:
+        print(f"Aviso: o daemon PID {child.pid} não encerrou.", file=sys.stderr, flush=True)
+    else:
+        print(f"Daemon de ações PID {child.pid} encerrado.", flush=True)
+
+
+def _logs(lines: int, follow: bool) -> int:
+    store = ProfileStore()
+
+    def show(event):
+        print(f"{event['created_at']} UTC  {event['kind']:<7} {event['message']}", flush=True)
+
+    events = list(reversed(store.recent_events(max(1, lines))))
+    for event in events:
+        show(event)
+    last_id = events[-1]["id"] if events else 0
+    try:
+        while follow:
+            time.sleep(.5)
+            for event in reversed(store.recent_events(100)):
+                if event["id"] > last_id:
+                    show(event); last_id = event["id"]
+    except KeyboardInterrupt:
+        pass
+    return 0
 
 if __name__ == "__main__": raise SystemExit(main())
 

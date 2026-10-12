@@ -4,6 +4,7 @@ from __future__ import annotations
 import glob
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -81,14 +82,14 @@ def discover() -> list[dict[str, Any]]:
     return found
 
 
-def d200_write_target() -> tuple[str | None, str | None]:
+def d200_write_target(devices: list[dict[str, Any]] | None = None) -> tuple[str | None, str | None]:
     """Return a hidraw node only for the documented two-interface D200 profile.
 
     VID/PID alone is shared by revisions with different protocols. Require the
     control endpoint pair documented by the Linux D200 implementation and a
     separate boot-keyboard interface before enabling display writes.
     """
-    for device in discover():
+    for device in discover() if devices is None else devices:
         interfaces = device["interfaces"]
         control = next((item for item in interfaces if item["number"].lower() == "00"), None)
         keyboard = next((item for item in interfaces if item["number"].lower() == "01"), None)
@@ -135,7 +136,7 @@ def capture_profile(devices: list[dict[str, Any]] | None = None) -> dict[str, st
         control, keyboard = interfaces.get("00"), interfaces.get("01")
         if len(interfaces) == 2 and control and keyboard and control.get("class") == "03" and keyboard.get("class") == "03":
             if control.get("protocol") == "00" and keyboard.get("protocol") == "01":
-                return {"mode": "keyboard_macros", "profile": "D200 2-interface", "reason": "esta revisão envia macros pelo teclado USB (interface 1)"}
+                return {"mode": "keyboard_macros", "profile": "D200 2-interface", "reason": "cliques chegam como eventos HID por slot (interface 0) em modo host e como macros de teclado (interface 1) no modo de fábrica"}
 
     return {"mode": "unavailable", "profile": "desconhecido", "reason": "topologia USB não corresponde a um perfil de entrada validado"}
 
@@ -167,29 +168,40 @@ def doctor() -> dict[str, Any]:
                 except (ValueError, IndexError): continue
                 if pid != os.getpid(): conflict_processes.append(line)
     permissions = any(h["readable"] for d in devices for i in d["interfaces"] if i["number"].lower() == "00" for h in i["hidraw"])
-    dependencies = {name: _run([name, "--version"])["available"] for name in ("lsusb", "udevadm", "xdotool")}
+    dependencies = {name: shutil.which(name) is not None for name in ("lsusb", "udevadm", "xdotool", "wtype", "ydotool")}
+    from .keyboard import keyboard_nodes
+    from .session import input_backend_status
+    keyboards = keyboard_nodes()
+    capture = capture_profile(devices)
+    backend = input_backend_status()
     recommendations = []
     if not devices:
         recommendations.append("Conecte o D200H diretamente ou confira `lsusb`; VID:PID esperado 2207:0019.")
     elif not permissions:
         recommendations.append("O usuário atual não pode ler os nós hidraw. Revise a regra udev documentada em installers/udev; nenhuma permissão foi alterada.")
-    if session["session_type"] == "wayland":
-        recommendations.append("Wayland detectado: envio global de teclas depende do compositor e não é garantido pelo DeckForge.")
-    elif session["session_type"] == "x11":
-        recommendations.append("X11 detectado: ações de teclado podem usar xdotool quando instalado.")
-    if not dependencies["xdotool"]:
-        recommendations.append("xdotool não encontrado; atalhos globais no X11 ficarão indisponíveis até instalá-lo.")
-    return {"device_found": bool(devices), "devices": devices, "control_accessible": permissions, "dependencies": dependencies, "conflicting_processes": conflict_processes, "commands": {"lsusb": lsusb, "lsusb_tree": tree, "lsusb_verbose": verbose, "udev": udev, "dmesg_warnings": dmesg}, "session": session, "recommendations": recommendations}
+    if devices and capture["mode"] == "keyboard_macros" and not any(n["readable"] for n in keyboards):
+        recommendations.append("A interface de teclado (interface 01) do D200H não pode ser lida; instale a regra udev 99-deckforge-d200h.rules e reconecte.")
+    if not backend["ready"]:
+        recommendations.append(f"Atalhos de teclado indisponíveis: {backend['detail']}")
+    return {"device_found": bool(devices), "devices": devices, "control_accessible": permissions,
+            "input_capture": capture, "keyboard_nodes": keyboards, "input_backend": backend,
+            "dependencies": dependencies, "conflicting_processes": conflict_processes, "commands": {"lsusb": lsusb, "lsusb_tree": tree, "lsusb_verbose": verbose, "udev": udev, "dmesg_warnings": dmesg}, "session": session, "recommendations": recommendations}
 
 
-def parse_button_report(report: bytes) -> dict[str, Any] | None:
-    """Parse only documented D200H button events; ignore all other input."""
+def parse_button_report(report: bytes, strict: bool = True) -> dict[str, Any] | None:
+    """Parse only documented D200H button events; ignore all other input.
+
+    ``strict`` also checks the first payload byte (1 for keys, 0 for the clock
+    area, per the D200H reference). The two-interface D200 reference calls it
+    firmware-internal state, so that path parses with ``strict=False``.
+    """
     if len(report) < 12 or report[:4] != b"||\x01\x01":
         return None
     category, slot, valid, pressed = report[8:12]
     if valid != 1 or slot > 13 or pressed not in (0, 1):
         return None
-    if (slot == 13 and category != 0) or (slot < 13 and category != 1):
+    if strict and ((slot == 13 and category != 0) or (slot < 13 and category != 1)):
         return None
-    return {"slot": slot, "category": category, "pressed": pressed == 1, "key": "clock" if slot == 13 else f"{slot // 5}_{slot % 5}"}
+    # Slot 13 is the wide display (2_3 + 2_4); it is configurable like a key.
+    return {"slot": slot, "category": category, "pressed": pressed == 1, "key": "2_3" if slot == 13 else f"{slot // 5}_{slot % 5}"}
 

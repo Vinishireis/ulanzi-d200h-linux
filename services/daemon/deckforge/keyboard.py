@@ -10,8 +10,14 @@ from typing import Iterator
 
 
 _INPUT_EVENT = struct.Struct("@llHHi")
+_EV_SYN = 0
 _EV_KEY = 1
+_SYN_DROPPED = 3
 _EVIOCGRAB = 0x40044590
+_MODIFIERS = {29, 125, 42, 54, 56, 97, 100}
+# Firmware macros type a whole token within a second or two. A longer pause
+# means the buffered plain text is not part of the same launcher macro.
+_TEXT_GAP_SECONDS = 5.0
 
 _KEY_NAMES = {
     1: "KEY_ESC", 12: "KEY_MINUS", 13: "KEY_EQUAL", 14: "KEY_BACKSPACE",
@@ -68,9 +74,21 @@ class KeyboardMacroDecoder:
     def __init__(self):
         self._held: set[int] = set()
         self._command: list[str] | None = None
+        self._last_time: float | None = None
         self.last_unmatched_command: str | None = None
+        # Human-readable macro behind the last returned slot, for the logs.
+        self.last_match: str | None = None
 
-    def feed(self, event: dict[str, int | str]) -> str | None:
+    def reset(self) -> None:
+        """Forget partial state, e.g. after the kernel reported dropped events."""
+        self._held.clear()
+        self._command = None
+        self._last_time = None
+
+    def feed(self, event: dict[str, int | str | float]) -> str | None:
+        if event.get("dropped"):
+            self.reset()
+            return None
         code, value = int(event["code"]), int(event["value"])
         if value == 0:
             self._held.discard(code)
@@ -78,15 +96,22 @@ class KeyboardMacroDecoder:
         if value != 1 or code in self._held:
             return None
         self._held.add(code)
+        now = event.get("time")
+        if isinstance(now, (int, float)):
+            if (self._command is not None and self._last_time is not None
+                    and now - self._last_time > _TEXT_GAP_SECONDS):
+                self._command = None
+            self._last_time = float(now)
 
         if self._command is not None:
             if code == 28:
                 command = "".join(self._command).lower()
                 self._command = None
-                slot = (WINDOWS_RUN_SLOTS.get(command) or MAC_RUN_SLOTS.get(command) or
-                        WINDOWS_RUN_SLOTS.get(command.removeprefix("r")) or
-                        MAC_RUN_SLOTS.get(command.removeprefix("r")))
+                token = next((candidate for candidate in (command, command.removeprefix("r"))
+                              if candidate in WINDOWS_RUN_SLOTS or candidate in MAC_RUN_SLOTS), None)
+                slot = (WINDOWS_RUN_SLOTS.get(token) or MAC_RUN_SLOTS.get(token)) if token else None
                 self.last_unmatched_command = None if slot else command
+                self.last_match = f"macro {token}" if slot else None
                 return slot
             if code == 1:
                 self._command = None
@@ -108,17 +133,22 @@ class KeyboardMacroDecoder:
         # text (for example "rcalc") instead of a Super+R key sequence. The
         # keyboard interface belongs to the deck, so buffer only this device's
         # text and resolve it on Enter against the firmware token allowlist.
-        if code not in {29, 125, 42, 54, 56, 97, 100} and not self._held.intersection({29, 125, 42, 54, 56, 97, 100}):
+        if code not in _MODIFIERS and not self._held.intersection(_MODIFIERS):
             char = _TEXT_BY_CODE.get(code)
             if char and len(self._command or ()) < 64:
                 if self._command is None:
                     self._command = []
                 self._command.append(char)
+        slot = None
         if 29 in self._held:
-            return SHORTCUT_SLOTS.get((29, code))
-        if 125 in self._held:
-            return MAC_SHORTCUT_SLOTS.get((125, code))
-        return None
+            slot = SHORTCUT_SLOTS.get((29, code))
+            label = "Ctrl"
+        elif 125 in self._held:
+            slot = MAC_SHORTCUT_SLOTS.get((125, code))
+            label = "Command"
+        if slot:
+            self.last_match = f"atalho {label}+{_LETTER_CODES.get(code, code)}"
+        return slot
 
 
 def _key_name(code: int) -> str:
@@ -162,16 +192,24 @@ def keyboard_nodes() -> list[dict[str, object]]:
         except OSError:
             readable = False
         nodes.append({"path": str(path), "readable": readable})
-    return nodes
+    return sorted(nodes, key=lambda node: node["path"])
 
 
-def read_key_events(path: str, stop=None, grab: bool = False) -> Iterator[dict[str, int | str]]:
-    """Yield key events; optionally keep the D200H from forwarding input to apps."""
+def read_key_events(path: str, stop=None, grab: bool = False, on_ready=None) -> Iterator[dict[str, int | str | float]]:
+    """Yield key events; optionally keep the D200H from forwarding input to apps.
+
+    ``on_ready`` runs once the node is open (and grabbed), so callers can start
+    slow work such as an LCD upload without letting macros leak to the desktop.
+    """
     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
     pending = bytearray()
+    grabbed = False
     try:
         if grab:
             fcntl.ioctl(fd, _EVIOCGRAB, 1)
+            grabbed = True
+        if on_ready is not None:
+            on_ready()
         while stop is None or not stop():
             ready, _, _ = select.select([fd], [], [], 0.5)
             if not ready:
@@ -184,14 +222,16 @@ def read_key_events(path: str, stop=None, grab: bool = False) -> Iterator[dict[s
                 return
             pending.extend(chunk)
             while len(pending) >= _INPUT_EVENT.size:
-                _, _, event_type, code, value = _INPUT_EVENT.unpack(
+                seconds, micros, event_type, code, value = _INPUT_EVENT.unpack(
                     pending[:_INPUT_EVENT.size]
                 )
                 del pending[:_INPUT_EVENT.size]
                 if event_type == _EV_KEY:
-                    yield {"key": _key_name(code), "code": code, "value": value}
+                    yield {"key": _key_name(code), "code": code, "value": value, "time": seconds + micros / 1e6}
+                elif event_type == _EV_SYN and code == _SYN_DROPPED:
+                    yield {"key": "SYN_DROPPED", "code": -1, "value": -1, "dropped": True}
     finally:
-        if grab:
+        if grabbed:
             try:
                 fcntl.ioctl(fd, _EVIOCGRAB, 0)
             except OSError:
