@@ -1,6 +1,8 @@
+import isolation  # noqa: F401  (must precede deckforge imports)
 import tempfile
 import io
 import json
+import subprocess
 import zipfile
 import unittest
 from pathlib import Path
@@ -23,7 +25,7 @@ class ProtocolTests(unittest.TestCase):
         report[11] = 0
         self.assertFalse(parse_button_report(report)["pressed"])
         report[8:12] = bytes([0, 13, 1, 1])
-        self.assertEqual(parse_button_report(report)["key"], "clock")
+        self.assertEqual(parse_button_report(report)["key"], "2_3")
 
     def test_ignores_other_or_malformed_reports(self):
         self.assertIsNone(parse_button_report(b"short"))
@@ -68,6 +70,7 @@ class ProtocolTests(unittest.TestCase):
     def test_single_key_sync_sends_full_profile_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ProfileStore(Path(tmp) / "profile.sqlite3")
+            store.activate_profile(store.create_profile("Vazio"))
             store.save_button("0_0", {"icon": "first.svg"})
             store.save_button("1_1", {"icon": "second.svg"})
             with patch("deckforge.lcd_sync.d200_write_target", return_value=("/dev/hidraw-test", None)), \
@@ -76,17 +79,28 @@ class ProtocolTests(unittest.TestCase):
                 result = sync_icons(store, "0_0")
             self.assertEqual(set(result["keys"]), {"0_0", "1_1"})
             self.assertEqual(render.call_count, 2)
-            send.assert_called_once()
+            # Full snapshot, then the DeckForge-drawn wide display (clock) as an additive update.
+            self.assertEqual([c.args[2] if len(c.args) > 2 else 0x0001 for c in send.call_args_list], [0x0001, 0x000D])
 
     def test_profile_without_icons_sends_empty_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ProfileStore(Path(tmp) / "profile.sqlite3")
-            store.delete_button("0_0")
+            store.activate_profile(store.create_profile("Vazio"))
+            store.save_button("0_0", {"type": "keys", "keys": ["ctrl", "c"]})  # no icon, no title
             with patch("deckforge.lcd_sync.d200_write_target", return_value=("/dev/hidraw-test", None)), \
                  patch("deckforge.lcd_sync._send", return_value=1) as send:
                 result = sync_icons(store)
             self.assertEqual(result["keys"], [])
-            send.assert_called_once()
+            self.assertEqual(send.call_count, 2)  # empty snapshot + wide display clock
+
+    def test_titled_keys_without_icon_are_rendered_as_text_tiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ProfileStore(Path(tmp) / "profile.sqlite3")  # starter profile: titles, no icons
+            with patch("deckforge.lcd_sync.d200_write_target", return_value=("/dev/hidraw-test", None)), \
+                 patch("deckforge.lcd_sync._send", return_value=1):
+                result = sync_icons(store)
+            self.assertEqual(len(result["slots"]), 14)  # 13 keys + the DeckForge clock on 2_3
+            self.assertIn("2_3", result["slots"])
 
 
 class ProfileTests(unittest.TestCase):
@@ -195,7 +209,8 @@ class ActionTests(unittest.TestCase):
             execute_action({"type": "command", "argv": ["/bin/sh", "-c", "touch /tmp/nope"]})
 
     def test_wayland_shortcut_uses_wtype_with_modifier_release(self):
-        with patch("deckforge.actions.shutil.which", side_effect=lambda name: {"wtype": "/usr/bin/wtype"}.get(name)):
+        with patch("deckforge.actions.shutil.which", side_effect=lambda name: {"wtype": "/usr/bin/wtype"}.get(name)), \
+             patch.dict("deckforge.actions.os.environ", {"XDG_CURRENT_DESKTOP": "sway"}):
             self.assertEqual(_shortcut_command(["ctrl", "shift", "t"], "wayland"),
                              ["/usr/bin/wtype", "-M", "ctrl", "-M", "shift", "-P", "t", "-p", "t", "-m", "shift", "-m", "ctrl"])
 
@@ -215,8 +230,9 @@ class ActionTests(unittest.TestCase):
                              ["/usr/bin/wtype", "-M", "logo", "-P", "d", "-p", "d", "-m", "logo"])
 
     def test_gnome_wayland_prefers_ydotool_evdev_sequence(self):
-        paths = {"ydotool": "/usr/bin/ydotool"}
+        paths = {"ydotool": "/usr/bin/ydotool", "wtype": "/usr/bin/wtype"}
         with patch("deckforge.actions.shutil.which", side_effect=lambda name: paths.get(name)), \
+             patch("deckforge.session.socket_ready", return_value=True), \
              patch.dict("deckforge.actions.os.environ", {"XDG_CURRENT_DESKTOP": "GNOME"}):
             self.assertEqual(_shortcut_command(["ctrl", "shift", "t"], "wayland"),
                              ["/usr/bin/ydotool", "key", "29:1", "42:1", "20:1", "20:0", "42:0", "29:0"])
@@ -224,16 +240,17 @@ class ActionTests(unittest.TestCase):
     def test_ydotool_maps_names_and_releases_modifiers(self):
         paths = {"ydotool": "/usr/bin/ydotool"}
         with patch("deckforge.actions.shutil.which", side_effect=lambda name: paths.get(name)), \
-             patch.dict("deckforge.actions.os.environ", {"XDG_CURRENT_DESKTOP": "GNOME"}), \
-             patch("deckforge.actions.subprocess.run") as run:
+             patch("deckforge.session.socket_ready", return_value=True), \
+             patch.dict("deckforge.actions.os.environ", {"XDG_SESSION_TYPE": "wayland", "XDG_CURRENT_DESKTOP": "GNOME"}), \
+             patch("deckforge.actions.subprocess.run", return_value=subprocess.CompletedProcess([], 0, b"", b"")) as run:
             result = execute_action({"type": "keys", "keys": ["super", "d"]})
-        self.assertEqual(result, "Atalho enviado via ydotool")
+        self.assertEqual(result, "Atalho super+d enviado via ydotool")
         self.assertEqual(run.call_args.args[0], ["/usr/bin/ydotool", "key", "125:1", "32:1", "32:0", "125:0"])
 
     def test_gnome_wtype_rejection_explains_required_backend(self):
         from subprocess import CalledProcessError
         with patch("deckforge.actions.shutil.which", side_effect=lambda name: {"wtype": "/usr/bin/wtype"}.get(name)), \
-             patch.dict("deckforge.actions.os.environ", {"XDG_CURRENT_DESKTOP": "GNOME"}), \
+             patch.dict("deckforge.actions.os.environ", {"XDG_SESSION_TYPE": "wayland", "XDG_CURRENT_DESKTOP": "GNOME"}), \
              patch("deckforge.actions.subprocess.run", side_effect=CalledProcessError(1, "wtype", stderr=b"Compositor does not support the virtual keyboard protocol")):
             with self.assertRaisesRegex(ActionError, "setup-wayland-input.sh"):
                 execute_action({"type": "keys", "keys": ["ctrl", "c"]})
@@ -241,9 +258,11 @@ class ActionTests(unittest.TestCase):
     def test_app_action_starts_selected_argv_without_shell(self):
         with patch("deckforge.actions.shutil.which", return_value="/usr/bin/xdg-open"), \
              patch("deckforge.actions.subprocess.Popen") as popen:
+            popen.return_value.wait.return_value = 0
             result = execute_action({"type": "app", "title": "GitHub",
                                      "argv": ["xdg-open", "https://github.com"]})
-        self.assertEqual(result, "Iniciado: xdg-open")
+        self.assertEqual(result, "xdg-open entregou https://github.com ao aplicativo padrão (código 0)")
+        self.assertNotIn("shell", popen.call_args.kwargs)
         self.assertEqual(popen.call_args.args[0], ["/usr/bin/xdg-open", "https://github.com"])
 
 
