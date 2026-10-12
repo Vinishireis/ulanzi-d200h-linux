@@ -30,13 +30,18 @@ O usuário confirmou que pressionou os botões na ordem física linha por linha.
 | Verificação física | Resultado |
 | --- | --- |
 | Enumerar VID:PID 2207:0019 | PASSOU neste host |
-| Ler interface vendor de controle | PASSOU: acesso confirmado; nenhum relatório de botão observado |
-| Observar macros na interface de teclado | PASSOU: eventos evdev capturados; identificados atalhos e comandos de execução |
-| Isolar macros para evitar que cheguem aos aplicativos | PASSOU: captura física concluída com `listen --keyboard --grab` |
-| Mapear as camadas Windows/Mac e o botão de ciclo | Windows capturado; tokens Mac implementados pela ordem publicada; confirmar ordem física nesta unidade |
-| Converter macros Windows e atalhos inferiores Command em posições | IMPLEMENTADO; coberto por testes do decoder |
-| Iniciar ação a partir do botão físico | Evento recente 0_0 executou `xdg-open`; faltam testes físicos das demais teclas |
-| Reconexão / sincronização de imagem | Reenvio automático registrado ao iniciar/reconectar; confirmação visual no LCD pendente |
+| Ler interface vendor de controle | PASSOU: acesso confirmado |
+| Observar macros na interface de teclado (modo de fábrica) | PASSOU: eventos evdev capturados com `listen --keyboard --grab` |
+| Converter macros Windows e atalhos inferiores em posições | IMPLEMENTADO e coberto por testes com as sequências capturadas; `calc → 0_0 → xdg-open` observado em 2026-10-12 00:41 UTC |
+| Modo host: resposta a `0x0006` | PASSOU em 2026-10-12: `DEVICE_INFO` `{"DeviceType": "D200", "Dversion": "5.3.1", "HardwareVersion": "SSD210V100"}` |
+| Modo host: clique → evento HID → ação | PASSOU em 2026-10-12 05:01–05:03 UTC: `0_0`, `0_1`, `0_2`, `0_3` (apps/URLs, código 0) e `2_2` (alt+F4 via ydotool) |
+| Envio de ícones | PASSOU: 43 quadros, ACK `0x010B` do firmware; renderização visual não confirmada pelo aparelho |
+| Reconexão física com o daemon novo | PASSOU em 2026-10-12 05:48 UTC: desconexão às 05:48:06, captura retomada no mesmo processo às 05:48:21 (após o boot `18d1:d002`), `DEVICE_INFO` e reenvio ao LCD às 05:48:22 |
+| Camadas Mac e botão de ciclo | PENDENTE |
+| Toque na área larga (slot HID 13) | PASSOU em 2026-10-12 05:37 UTC: `2_3` recebido e registrado como “somente exibição” |
+| Relógio da área larga sem a marca Ulanzi | IMPLEMENTADO: o DeckForge desenha relógio/estatísticas como imagem `3_2` (via `0x000D`) e mantém o firmware em `2|0|0|00:00:00|0`; envio com ACK em 2026-10-12 05:49 UTC; conferência visual PENDENTE |
+| Área larga com imagem do usuário (upload ou link) | IMPLEMENTADO e testado em software; conferência visual PENDENTE |
+| Brilho (`0x000A`, ASCII) e títulos desenhados nas teclas | IMPLEMENTADO; conferência visual no LCD PENDENTE |
 
 ## Atalhos no GNOME Wayland
 
@@ -51,3 +56,35 @@ Ao salvar/remover uma tecla, trocar de perfil ou reaplicar a tela, o backend ren
 A transferência usa o byte de Report ID `0x00` exigido por `hidraw` no Linux, declara o tamanho total do ZIP e valida as entradas e o limite de 196 KiB antes de escrever. Teste físico em 2026-10-11: quatro ícones renderizados e validados como PNG; snapshot de 43.031 bytes transmitido em 43 quadros pelo `/dev/hidraw` liberado por udev. A API confirma somente que os quadros foram escritos; não temos um retorno de renderização do firmware, então o resultado visual só pode ser verificado olhando a tela. A referência publicada para outra revisão D200H documenta três interfaces, firmware `UlanziDeckKey 2.0.3` e endpoints `0x81 IN / 0x02 OUT`; não aplicamos o handshake dessa revisão ao dispositivo local de topologia diferente.
 
 O firmware local pode voltar à tela de fábrica quando perde a conexão USB. Com `deckforge serve` ativo, o daemon detecta a interface de teclado reaparecendo e transmite novamente o snapshot completo, inclusive um manifesto vazio quando não há ícones configurados. Sem o daemon, o host não reaplica as imagens após reconectar; as ações Linux continuam no perfil salvo. A regra udev precisa manter permissão de escrita no hidraw da interface 0.
+
+
+## Modo host (D200 firmware 5.3.1)
+
+Causa encontrada para "clicar no botão não executa nada": ao receber o pacote de ícones (`0x0001`), o firmware entra em modo host e passa a informar os cliques pela interface HID 0 (`7c 7c 01 01`, slot no byte 9, pressionado no byte 11) em vez de digitar macros na interface de teclado. O daemon antigo enviava os ícones, mas só escutava o teclado e não mantinha o keep-alive. Hoje ele escuta os dois canais e envia o relógio a cada 2 s. Com a opção "Modo host" desligada em Automação, nenhum ícone nem keep-alive é enviado e o aparelho volta ao modo de fábrica depois de reconectar.
+
+Ao reconectar, o dock reaparece primeiro como `18d1:d002` por ~5 s e depois como `2207:0019`; o daemon trata esse intervalo como espera, não como erro.
+
+## Validação final no aparelho
+
+```sh
+deckforge restart
+deckforge status        # input_capture.profile = "D200 2-interface", runtime.capture.state = "active"
+deckforge logs -f       # pressione uma tecla com atalho (ex.: 1_1 Salvar) e uma com app/URL (ex.: 0_0)
+```
+
+Cada clique deve gerar `Botão físico recebido: <slot> (...)` seguido de `<slot> · <título>: <resultado>` (ou um erro explicando a falha). Depois desconecte e reconecte o dock: em até ~15 s deve aparecer `Captura de macros retomada após reconexão` e um novo envio ao LCD.
+
+### Clique pendente ao reabrir a interface HID
+
+Por duas vezes um clique foi executado no mesmo segundo em que o daemon reiniciou (`0_0` às 05:12:31 e `1_0` às 05:37:35 UTC). Em duas reproduções controladas sem cliques nada chegou. A explicação compatível com os dados é que, enquanto ninguém lê a interface 0, o dock mantém o último relatório pendente e o entrega quando o hidraw é reaberto. O daemon agora descarta eventos de botão recebidos no primeiro segundo após abrir a interface e registra o descarte em Logs. Assim um clique antigo (por exemplo, `alt+F4`) nunca é executado com atraso.
+
+### Funções novas que dependem de conferência visual
+
+1. Meu Deck → área larga → “Estatísticas do sistema” → Salvar: a área deve mostrar CPU, RAM e GPU atualizando a cada ~2 s.
+2. Área larga → “Imagem personalizada”, com um ícone e um título → Salvar: a imagem 392×196 deve substituir o relógio.
+3. Configurações → Brilho do LCD → ligar e mover o controle: o brilho deve mudar.
+4. Uma tecla sem ícone com título: o título deve aparecer desenhado na tecla.
+
+### Relógio do firmware com a marca Ulanzi
+
+No modo `CLOCK` (`1|…`) e `STATS` (`0|…`) quem desenha a área larga é o firmware, sobre um fundo com a marca Ulanzi que o host não consegue alterar. Por padrão o DeckForge agora desenha o relógio (hora e data) e as estatísticas (CPU, RAM, GPU) como uma imagem 392×196 própria. Ele envia essa imagem como manifesto `3_2` por `PARTIALLY_UPDATE_BUTTONS` e mantém o firmware no modo `BACKGROUND`. O daemon redesenha o relógio a cada minuto e as estatísticas a cada 4 s. O desenho do firmware continua disponível em Meu Deck → área larga → Desenho → “Firmware Ulanzi”.

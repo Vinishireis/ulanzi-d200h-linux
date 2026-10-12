@@ -1,21 +1,35 @@
 # Arquitetura do DeckForge Linux
 
-## Estado atual
+## Módulos
 
-- `services/daemon/deckforge/device.py`: descoberta via sysfs e comandos de diagnóstico, leitura sem escrita.
-- `transport.py`: contrato `DeviceTransport`, `HidTransport` read-only, `MockTransport` e `RecordingTransport`.
-- `daemon.py`: intercepta a interface evdev de teclado do D200H para decodificar macros; também mantém o caminho hidraw de leitura de eventos de controle e sincroniza novamente os ícones salvos ao reconectar o teclado.
-- `actions.py`: ações tipadas (`keys`, `app`, `command`), processos executados por argv sem shell, atalhos X11 por `xdotool` e Wayland por `wtype`.
-- `store.py`: perfis, botões e eventos em SQLite sob `$XDG_DATA_HOME/deckforge`.
-- `api.py`: API HTTP local para o editor e WebSocket para atualizações; valida Host/Origin e não habilita CORS.
-- `apps/desktop`: editor React/TypeScript, prévia local do layout de 13 teclas, painel de status e diagnóstico. O adaptador Tauri 2 é o invólucro desktop previsto; a execução atual pode ser feita como editor local no Vite.
+- `services/daemon/deckforge/device.py`: descoberta via sysfs, perfil de captura pela topologia USB e diagnóstico (`doctor`).
+- `keyboard.py`: leitura evdev da interface 1 (com `EVIOCGRAB`) e `KeyboardMacroDecoder`, que converte as macros do firmware em posições `linha_coluna`.
+- `daemon.py`: processo único por usuário (lock em `$XDG_RUNTIME_DIR`). Componentes:
+  - laço principal: redescobre o D200H a cada conexão, abre e isola o teclado e só então pede o envio ao LCD (nenhuma macro vaza para o desktop durante o envio);
+  - `ControlChannel`: lê a interface HID 0 (eventos de botão `0x0101`, `DEVICE_INFO` `0x0303`, heartbeat) e envia o keep-alive de relógio `0x0006` a cada 2 s;
+  - `ActionDispatcher`: fila e thread de execução; o leitor nunca bloqueia esperando uma ação. Um clique informado pelos dois canais (HID e macro) em até 2 s executa uma única vez;
+  - `LcdSyncWorker`: envio em segundo plano, com novas tentativas após reconexão;
+  - sai ao receber SIGTERM/SIGINT/SIGHUP ou quando o processo pai (`deckforge serve`) deixa de existir.
+- `actions.py`: ações tipadas (`keys`, `app`, `command`) por argv, sem shell. Atalhos: ydotool (GNOME Wayland, socket do `deckforge-ydotoold`), wtype (outros Wayland), xdotool (X11); falha ou timeout libera todas as teclas. Aplicativos: o código de saída é observado por 1,5 s.
+- `session.py`: ambiente da sessão gráfica (com fallback para o ambiente do systemd do usuário), diretório de runtime e escolha do backend de atalhos.
+- `lcd_sync.py`: renderiza os ícones, monta o ZIP e envia relógio → drenagem → ZIP → espera do ACK `0x010B`, sob um `flock` compartilhado entre API e daemon para que quadros nunca se intercalem.
+- `store.py`: perfis, botões, eventos, estado em tempo real (`state`) e configurações (`settings`) em SQLite.
+- `status.py`: estado combinado para a API e `deckforge status`; estado publicado por um daemon que não está mais vivo nunca é mostrado como ativo.
+- `processes.py` e `cli.py`: ciclo de vida (`serve`, `stop`, `restart`), verificação de porta e lock, SIGTERM→SIGKILL.
+- `api.py`: API local (somente loopback) e WebSocket `/api/live`, que encerra assim que o cliente desconecta.
+- `apps/desktop`: editor React/TypeScript servido pela própria API (`apps/desktop/dist`).
+
+## Fluxo de um clique
+
+```
+D200H ──(modo host) HID if0 0x0101 slot──┐
+      └─(modo fábrica) teclado if1 macro─┴─> ActionDispatcher (dedup) ─> ação do perfil ativo ─> evento + estado
+```
 
 ## Limites deliberados
 
-O decoder só converte as sequências Windows e atalhos físicos confirmados em posições da grade. As camadas Mac e os ciclos de layouts precisam de capturas evdev separadas antes de serem associados a ações, pois o D200H emite macros diferentes por camada e não fornece um identificador único da tecla. O protocolo do LCD é independente da interface de teclado e tem limites registrados em `hardware-validation.md`.
-
-O perfil inicial contém ações exemplo. Atalhos X11 precisam de `xdotool`; atalhos Wayland precisam de `wtype` e suporte do compositor. Aplicativos e comandos são iniciados pelo backend por listas de argumentos, sem interpretação do shell.
+As camadas Mac e o botão de ciclo do modo de fábrica precisam de capturas próprias. O firmware não confirma a renderização do LCD; o ACK confirma apenas o recebimento do pacote. A escrita HID só é habilitada para a topologia D200 de duas interfaces validada.
 
 ## API
 
-Execute `deckforge serve` para escutar somente em `127.0.0.1:8765`; execute `deckforge daemon` para escutar o dispositivo. A API não deve ser publicada na rede. Perfis e configuração são locais ao usuário.
+`deckforge serve` escuta somente em `127.0.0.1:8765`. A API não deve ser publicada na rede.

@@ -5,18 +5,47 @@ Editor e serviço Linux para o Ulanzi Deck Dock D200H, com diagnóstico, perfis 
 ## Estado atual
 
 - Detecta VID/PID `2207:0019` via sysfs e resume interfaces/hidraw/permissões.
-- `doctor`, `devices`, `listen` (somente leitura), `listen --raw` (relatórios HID) e `listen --keyboard` (teclas emitidas pelo D200H).
-- Daemon para mapear eventos à ação guardada no perfil SQLite.
-- Ações de atalho X11 via xdotool e Wayland via wtype/ydotool, abrir aplicativo e processo com argv, sem shell.
-- Editor React: dashboard, mapa físico das teclas, edição de ação por tecla, perfis locais, diagnóstico e logs.
-- Seletor de aplicativos instalados via arquivos `.desktop`: preenche o executável e os argumentos do Linux e associa automaticamente o ícone do aplicativo à prévia e ao LCD.
-- Biblioteca local com 454 ícones Logos Solid da Streamline; permite buscar por categoria, aplicar um logo à tecla e visualizar a arte no editor. Os SVGs são distribuídos sem alteração sob CC BY 4.0; consulte [atribuição e licença](apps/desktop/public/icons/streamline-logos-solid/ATTRIBUTION.md).
-- Renderização SVG→PNG e sincronização do perfil completo via HID para o perfil USB D200 de duas interfaces (`0x82 IN` / `0x01 OUT`). O envio só é habilitado quando a topologia completa corresponde a esse perfil; revisões diferentes permanecem bloqueadas.
-- Unidade systemd de usuário e regra udev fornecidas para revisão manual.
+- `doctor`, `devices`, `status`, `logs`, `listen` (somente leitura), `listen --raw` (relatórios HID) e `listen --keyboard` (teclas emitidas pelo D200H).
+- Daemon que captura os cliques por **dois canais** e executa a ação salva no perfil ativo, uma única vez por clique:
+  - **modo host** (interface HID 0): depois que o DeckForge envia os ícones, o firmware passa a informar o slot de cada clique (`0x0101`). O daemon mantém esse modo com um keep-alive de relógio (`0x0006`) a cada 2 s;
+  - **modo de fábrica** (interface 1, teclado): macros `Super+R` + token + `Enter` (`calc`, `cmd`, … `taskmgr`) e `Ctrl+S/Z/C`, decodificadas para `0_0`…`2_2`.
+- Ações sem shell: atalhos via `ydotool` no GNOME Wayland (`wtype` em outros compositores Wayland, `xdotool` no X11), aplicativos e URLs por argv. O resultado registrado é o real: código de saída do `xdg-open`/app, saída de erro do `ydotool`, e as teclas são liberadas mesmo em falha ou timeout.
+- Editor React com estado real (conexão USB, captura, canal HID, backend de atalhos, última ação, último envio ao LCD) e as abas Visão geral, Meu Deck, Perfis (criar, ativar, renomear, excluir, exportar), Macros (o que o firmware envia e o teste de cada tecla), Biblioteca de ações, Biblioteca de ícones, Integrações (verificações reais e teste do backend de atalhos), Automação (modo host e registro de teclas brutas), Diagnóstico, Logs (filtros, ao vivo) e Configurações (tema, backup e importação de perfil).
+- Recursos no estilo Stream Deck:
+  - **ações**: atalho (com gravador de combinação), teclas de mídia, abrir aplicativo ou site, comando, digitar texto, trocar perfil (páginas: próximo, anterior ou um perfil específico), multi-ação com até 10 passos e atrasos, e “somente exibição”;
+  - **aparência por tecla**: cor de fundo, ícone com cor automática, original ou personalizada, e título no LCD (em cima, no centro, embaixo ou oculto). A prévia do editor é gerada pelo mesmo renderizador que envia a imagem ao aparelho;
+  - **área larga (2_3 + 2_4) configurável**: ação ao tocar (slot HID 13), relógio do firmware (24 h ou 12 h), estatísticas reais do sistema (CPU, RAM, GPU) ou imagem personalizada 392×196 (cor, ícone, título);
+  - **brilho do LCD** (0–100), em Configurações.
+- Biblioteca de ícones:
+  - **23.140 ícones gratuitos da Streamline** em 20 estilos, incluindo coloridos, emojis, logos e pixel (CC BY 4.0, via Iconify; veja a [atribuição](apps/desktop/public/icons/streamline/ATTRIBUTION.md));
+  - os 454 Logos Solid originais ([atribuição](apps/desktop/public/icons/streamline-logos-solid/ATTRIBUTION.md));
+  - busca em português ou inglês, com filtro por estilo e categoria;
+  - ícones dos aplicativos instalados, lidos automaticamente dos `.desktop` e aplicados ao escolher o app ou pelo botão “Detectar ícones de apps”;
+  - **upload** (PNG, JPG, WEBP, GIF, BMP, ICO, SVG até 5 MB; arrastar e soltar) e **importação por URL**.
+- Envio do perfil completo de ícones ao LCD (perfil USB D200 de duas interfaces, `0x82 IN` / `0x01 OUT`): relógio → drenagem → ZIP (`0x0001`) → ACK (`0x010B`). O ACK confirma que o firmware **recebeu** o pacote; a renderização não é confirmada pelo aparelho.
 
-O perfil SQLite fica em `~/.local/share/deckforge/deckforge.sqlite3` e não é apagado ao desconectar o USB. O dispositivo observado neste host expõe duas interfaces HID; sua topologia de controle coincide com a referência Linux para o D200. Ao reconectar, o daemon reaplica os ícones do perfil ativo ao LCD compatível. Capturas de entrada continuam separadas do envio de imagens: `listen --keyboard` observa os macros evdev e `listen --raw` investiga relatórios da interface de controle.
+Os pacotes Streamline são gerados de forma reprodutível com `python3 scripts/build-streamline-icons.py --download`. Ícones enviados ficam em `~/.local/share/deckforge/icons`.
 
-Ao salvar ou remover uma tecla, ou trocar o perfil ativo, o DeckForge envia novamente o snapshot completo para não deixar imagens antigas no aparelho. Perfis sem ícones enviam um manifesto vazio para limpar a tela. O botão “Sincronizar ícones deste perfil” usa o mesmo fluxo. A cor é usada como fundo da imagem. Consulte [validação do hardware](docs/hardware-validation.md) para a identificação e as limitações da unidade.
+O perfil SQLite fica em `~/.local/share/deckforge/deckforge.sqlite3` e não é apagado ao desconectar o USB. Ao reconectar, o daemon redescobre os nós `event`/`hidraw`, retoma a captura no mesmo processo e reenvia os ícones (com novas tentativas enquanto o udev aplica as permissões). Consulte [validação do hardware](docs/hardware-validation.md).
+
+## Uso
+
+```sh
+cd ~/React_Projects/ulanzi-d200h-linux
+. .venv/bin/activate
+deckforge restart      # para instâncias antigas e inicia API + daemon com o código atual
+# editor: http://127.0.0.1:8765
+deckforge status       # dispositivo, captura, backend de atalhos, última ação e LCD
+deckforge logs -f      # cliques físicos e o resultado real de cada ação, ao vivo
+deckforge trigger 0_0  # executa a ação salva de uma tecla sem o aparelho (teste de software)
+deckforge stop         # encerra API e daemon e confirma porta 8765 e lock livres
+```
+
+`deckforge serve` é dono do daemon que inicia: Ctrl+C, `deckforge stop`, SIGTERM ou o fechamento do terminal encerram os dois. Se o `serve` morrer à força, o daemon percebe e sai sozinho, então nenhum processo antigo fica segurando o teclado do D200H. `deckforge stop` envia SIGTERM, espera 5 s, usa SIGKILL no que restar e só retorna 0 com a porta e o lock livres.
+
+O script `./scripts/repair-deckforge.sh` reinstala dependências, recompila a interface, reinicia o DeckForge e reenvia os ícones; Ctrl+C nele encerra API e daemon.
+
+No GNOME Wayland, `wtype` é recusado pelo compositor; os atalhos usam `ydotool` pelo serviço de usuário `deckforge-ydotoold` (`sudo ./scripts/setup-wayland-input.sh` instala e ativa). A aba Integrações e `deckforge status` mostram o backend em uso e o motivo de qualquer indisponibilidade. A regra udev do D200H deve permitir leitura do `/dev/input/event*` da interface 1 e leitura/escrita no `hidraw` da interface 0. Por segurança, a API aceita apenas `127.0.0.1:8765`.
 
 ## Desenvolvimento
 
@@ -24,27 +53,13 @@ Ao salvar ou remover uma tecla, ou trocar o perfil ativo, o DeckForge envia nova
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -e .
-deckforge doctor
-deckforge devices
-deckforge listen
-deckforge listen --keyboard
-deckforge listen --keyboard --grab
+npm --prefix apps/desktop ci && npm --prefix apps/desktop run build
+PYTHONPATH=services/daemon python3 -m unittest discover -s tests/unit -v
 ```
 
-Para iniciar a interface/API e o executor de ações juntos, rode `deckforge serve`. Ele inicia o daemon em segundo plano e grava o log em `~/.local/share/deckforge/logs/daemon.log`. O daemon detecta o perfil USB: revisões de três interfaces leem o ID do botão pelo HID de controle; o D200 de duas interfaces intercepta os macros emitidos pelo teclado e reconhece tanto `Super+R` quanto tokens de texto como `rcalc`. Cada clique registrado aparece em Logs como “Botão físico recebido”, seguido do resultado ou erro da ação. O decoder mapeia os tokens de aplicativos Windows/Mac conhecidos e os atalhos físicos confirmados. No GNOME Wayland, `wtype` pode estar instalado e ainda assim ser recusado pelo compositor; configure o backend `ydotool` com `sudo ./scripts/setup-wayland-input.sh`. O ajuste concede acesso a `/dev/uinput` somente ao grupo `plugdev` e mantém o socket do daemon privado ao usuário. Em outros compositores Wayland, use `wtype` ou `ydotool`; no X11, instale `xdotool`. Aplicativos e comandos abrem diretamente, sem shell. O botão GitHub da biblioteca associa `xdg-open https://github.com` à tecla quando ela ainda usa uma ação inicial. Por segurança, o backend aceita apenas `127.0.0.1:8765`.
+Os testes não usam o banco nem o hardware do usuário (`tests/unit/isolation.py` aponta dados e runtime para um diretório temporário). Eles cobrem decoder com as sequências capturadas, deduplicação entre canais, execução e falha real de ações, liberação de teclas, persistência, reconexão, morte do processo pai e o encerramento da API com o editor conectado. A validação no aparelho é registrada à parte em [hardware-validation.md](docs/hardware-validation.md).
 
-Para reconstruir, reiniciar versões antigas e reenviar todos os ícones salvos ao LCD, use o comando de reparo no terminal do projeto:
-
-```sh
-cd ~/React_Projects/ulanzi-d200h-linux
-./scripts/repair-deckforge.sh
-```
-
-O script atualiza as dependências, compila a interface, reinicia somente os processos DeckForge do usuário e envia os ícones do perfil ativo. No GNOME Wayland, use `sudo ./scripts/setup-wayland-input.sh` para instalar e ativar ydotool, regra udev de `/dev/uinput` e o serviço privado do usuário. Em outros ambientes Wayland, `wtype` funciona quando o compositor habilita o protocolo; no X11, instale `xdotool`. A regra udev do D200H deve continuar permitindo leitura de `/dev/input/event*` da interface de teclado e escrita no `hidraw` da interface de controle. O firmware não confirma a renderização do LCD; o comando confirma apenas que os quadros foram enviados.
-
-Os testes básicos offline rodam com `PYTHONPATH=services/daemon python3 -m unittest discover -s tests/unit -v`.
-
-Para instalar somente no usuário: `./scripts/install-user.sh` (requer Node.js/npm). A instalação não instala a regra udev nem ativa serviço; o launcher `deckforge app` abre o editor no navegador padrão e inicia o daemon local. Leia [hardware-validation.md](docs/hardware-validation.md) antes de conceder acesso de leitura às interfaces do D200H.
+Para instalar somente no usuário: `./scripts/install-user.sh` (requer Node.js/npm). A instalação não instala a regra udev nem ativa serviço; o launcher `deckforge app` abre o editor no navegador padrão e inicia o daemon local.
 
 ## Pesquisa e licenças de referência
 
@@ -55,6 +70,6 @@ Para instalar somente no usuário: `./scripts/install-user.sh` (requer Node.js/n
 
 ## Planejamento
 
-As próximas validações são observar a atualização de imagens no LCD desta revisão e capturar separadamente as camadas Mac e ciclo. Consulte [arquitetura](docs/architecture.md) e [validação física](docs/hardware-validation.md).
+Pendências físicas: confirmar visualmente os ícones no LCD em modo host com keep-alive, e capturar separadamente as camadas Mac e o botão de ciclo no modo de fábrica. Consulte [arquitetura](docs/architecture.md) e [validação física](docs/hardware-validation.md).
 
 Licença deste código: MIT.
