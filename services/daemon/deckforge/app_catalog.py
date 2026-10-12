@@ -7,6 +7,8 @@ import os
 import re
 import shlex
 import shutil
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -130,9 +132,21 @@ def _entry(path: Path) -> dict[str, Any] | None:
             "icon_path": str(icon_path) if icon_path else None}
 
 
+_CACHE_SECONDS = 60.0
+_cache: tuple[float, list[dict[str, Any]]] | None = None
+_cache_lock = threading.Lock()
+
+
 def _all_applications() -> list[dict[str, Any]]:
-    apps = [app for path in _desktop_files() if (app := _entry(path)) is not None]
-    return sorted(apps, key=lambda app: app["name"].casefold())
+    # Parsing every .desktop file takes ~0.7 s; each icon request needs the list.
+    global _cache
+    with _cache_lock:
+        if _cache is not None and time.monotonic() - _cache[0] < _CACHE_SECONDS:
+            return _cache[1]
+        apps = sorted((app for path in _desktop_files() if (app := _entry(path)) is not None),
+                      key=lambda app: app["name"].casefold())
+        _cache = (time.monotonic(), apps)
+        return apps
 
 
 def installed_applications() -> list[dict[str, Any]]:
