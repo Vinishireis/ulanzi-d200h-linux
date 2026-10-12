@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deckforge-linux"
+version = "0.1.0"
+description = "Linux control center for the Ulanzi D200H"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = ["fastapi>=0.115", "uvicorn[standard]>=0.30", "pydantic>=2.8", "Pillow>=10", "CairoSVG>=2.7"]
+
+[project.optional-dependencies]
+udev = ["pyudev>=0.24"]
+
+[project.scripts]
+deckforge = "deckforge.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["services/daemon"]
+

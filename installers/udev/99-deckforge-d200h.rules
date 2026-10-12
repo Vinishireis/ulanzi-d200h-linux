@@ -1,0 +1,9 @@
+# Grants members of plugdev access only to the D200H vendor control interface.
+# uaccess remains enabled for desktop sessions managed by systemd-logind.
+# Reload the rule and reconnect the device after installing it.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2207", ATTRS{idProduct}=="0019", ENV{ID_USB_INTERFACE_NUM}=="00", GROUP="plugdev", MODE="0660", TAG+="uaccess"
+
+# Optional read access to the D200H keyboard event node. DeckForge uses this
+# to identify the key sequences emitted by firmware configured for Windows/Mac.
+# The permission is scoped to this device's keyboard interface only.
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_USB_VENDOR_ID}=="2207", ENV{ID_USB_MODEL_ID}=="0019", ENV{ID_USB_INTERFACE_NUM}=="01", GROUP="plugdev", MODE="0640", TAG+="uaccess"

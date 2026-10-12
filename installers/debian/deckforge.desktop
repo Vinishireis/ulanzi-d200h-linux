@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=DeckForge Linux
+Comment=Configure your Ulanzi D200H
+Exec=deckforge app
+Icon=preferences-desktop-keyboard
+Terminal=false
+Categories=Utility;System;
