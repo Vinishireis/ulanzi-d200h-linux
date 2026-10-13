@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import * as Accordion from '@radix-ui/react-accordion';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as Tabs from '@radix-ui/react-tabs';
@@ -12,18 +12,31 @@ export const isHosted = !LOCAL_HOSTS.has(window.location.hostname) && window.loc
 const REPO = 'https://github.com/Vinishireis/ulanzi-d200h-linux';
 const THEME_KEY = 'deckforge-theme';
 
-type Probe = { state: 'checking' } | { state: 'offline' } | { state: 'outdated' } | { state: 'blocked' | 'ready'; version: string };
+type Probe = { state: 'checking' } | { state: 'offline' } | { state: 'outdated' } | { state: 'foreign' } | { state: 'blocked' | 'ready'; version: string };
+const HELLO = 'http://127.0.0.1:8765/api/hello';
 
 /** Ask the DeckForge on this computer whether it runs and allows this site. */
-async function probe(): Promise<Probe> {
+async function probeOnce(): Promise<Probe> {
   try {
-    const response = await fetch('http://127.0.0.1:8765/api/hello', { cache: 'no-store' });
+    const response = await fetch(HELLO, { cache: 'no-store' });
     if (response.status === 404) return { state: 'outdated' };
-    if (!response.ok) return { state: 'offline' };
+    if (!response.ok) return { state: 'foreign' };
     const hello = await response.json();
     return { state: hello.online_editor ? 'ready' : 'blocked', version: hello.version };
   } catch {
-    return { state: 'offline' };  // not installed, stopped, or the browser refused the local request
+    // A DeckForge that does not accept this site's address answers without CORS
+    // headers, which fails like "nothing listening". An opaque no-cors request
+    // tells the two apart without the API trusting this site.
+    try { await fetch(HELLO, { mode: 'no-cors', cache: 'no-store' }); return { state: 'foreign' }; } catch { return { state: 'offline' }; }
+  }
+}
+
+/** On the first visit the browser may still be asking for local-network access: retry briefly before giving up. */
+async function probe(attempts = 1): Promise<Probe> {
+  for (let attempt = 1; ; attempt++) {
+    const result = await probeOnce();
+    if (result.state !== 'offline' || attempt >= attempts) return result;
+    await new Promise((resolve) => window.setTimeout(resolve, 800));
   }
 }
 
@@ -39,15 +52,20 @@ function useTheme() {
 export function SiteGate() {
   const [status, setStatus] = useState<Probe>({ state: 'checking' });
   const [entered, setEntered] = useState(false);
-  const check = useCallback(async () => setStatus(await probe()), []);
+  const busy = useRef(false);
+  const check = useCallback(async (attempts = 1) => {
+    if (busy.current) return;  // the first-load retries take about as long as the polling interval
+    busy.current = true;
+    try { setStatus(await probe(attempts)); } finally { busy.current = false; }
+  }, []);
   useEffect(() => {
-    void check();
+    void check(5);
     const timer = window.setInterval(() => { if (!entered) void check(); }, 4000);
     return () => window.clearInterval(timer);
   }, [check, entered]);
   useEffect(() => { if (status.state === 'ready' && new URLSearchParams(window.location.search).has('editor')) setEntered(true); }, [status.state]);
   if (entered && status.state === 'ready') return <App />;
-  return <Site status={status} onRetry={check} onEnter={() => { setEntered(true); history.replaceState(null, '', '?editor'); }} />;
+  return <Site status={status} onRetry={() => { setStatus({ state: 'checking' }); void check(3); }} onEnter={() => { setEntered(true); history.replaceState(null, '', '?editor'); }} />;
 }
 
 const steps: { id: string; title: string; note: string; commands: string[] }[] = [
@@ -80,6 +98,7 @@ const STATE_COPY: Record<Probe['state'], { title: string; text: string }> = {
   checking: { title: 'Procurando o DeckForge…', text: 'Verificando se o DeckForge está rodando neste computador.' },
   offline: { title: 'DeckForge não encontrado', text: 'Instale o DeckForge (três passos abaixo) ou inicie-o com “deckforge restart”. Se o navegador pedir acesso à rede local, permita.' },
   outdated: { title: 'Atualize o DeckForge', text: 'O DeckForge deste computador é anterior ao editor online. Rode “git pull” no projeto e “./scripts/repair-deckforge.sh”.' },
+  foreign: { title: 'DeckForge encontrado, mas sem acesso por este endereço', text: `O DeckForge deste computador está rodando, mas não reconhece ${window.location.origin}. Atualize-o (“git pull” na pasta do projeto e “deckforge restart”).` },
   blocked: { title: 'Falta permitir este site', text: 'O DeckForge está rodando, mas o editor online está bloqueado. Rode o comando abaixo no terminal; esta página conecta sozinha.' },
   ready: { title: 'D200H pronto para configurar', text: 'O DeckForge deste computador permitiu este site. Abra o editor para mapear teclas, páginas e o relógio.' },
 };
@@ -113,7 +132,7 @@ function Site({ status, onRetry, onEnter }: { status: Probe; onRetry: () => void
             <h1>Seu Ulanzi D200H, <em>do jeito que você trabalha.</em></h1>
             <p>Mapeie teclas, crie páginas, escolha entre 23 mil ícones e deixe o relógio com cara de editor de código. Tudo direto do navegador, executado pelo DeckForge no seu Linux.</p>
             <div className={`site-status ${status.state}`} role="status" aria-live="polite">
-              <span className="site-status-icon">{status.state === 'checking' ? <Loader2 size={18} className="spin" /> : status.state === 'ready' ? <Check size={18} /> : status.state === 'blocked' ? <KeyRound size={18} /> : <Power size={18} />}</span>
+              <span className="site-status-icon">{status.state === 'checking' ? <Loader2 size={18} className="spin" /> : status.state === 'ready' ? <Check size={18} /> : status.state === 'blocked' || status.state === 'foreign' ? <KeyRound size={18} /> : <Power size={18} />}</span>
               <div><b>{copyText.title}</b><span>{copyText.text}</span>
                 {status.state === 'blocked' && <button className="site-command inline" onClick={() => copy('deckforge online on')}><code>deckforge online on</code><Copy size={14} /></button>}
               </div>

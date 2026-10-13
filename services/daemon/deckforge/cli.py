@@ -49,7 +49,7 @@ def main():
     logs = sub.add_parser("logs", help="mostrar o histórico de eventos do DeckForge")
     logs.add_argument("-n", "--lines", type=int, default=30, help="quantidade de eventos recentes")
     logs.add_argument("-f", "--follow", action="store_true", help="acompanhar novos eventos até Ctrl+C")
-    online = sub.add_parser("online", help="permitir ou bloquear o editor online (deckforge-d200h.vercel.app) neste computador")
+    online = sub.add_parser("online", help="permitir ou bloquear o editor online (ulanzi-d200h-linux.vercel.app) neste computador")
     online.add_argument("state", nargs="?", choices=["on", "off", "status"], default="status")
     trigger = sub.add_parser("trigger", help="executar a ação salva de uma posição sem usar o dispositivo (teste de software)")
     trigger.add_argument("slot", choices=SLOTS, help="posição no formato linha_coluna, por exemplo 0_0")

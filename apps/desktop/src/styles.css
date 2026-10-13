@@ -323,7 +323,7 @@ html{scroll-behavior:smooth}
 .site-status-icon{width:34px;height:34px;flex:0 0 34px;border-radius:10px;display:grid;place-items:center;background:var(--panel2);color:var(--muted)}
 .site-status.ready{border-color:color-mix(in srgb,var(--accent) 50%,var(--border))}
 .site-status.ready .site-status-icon{background:var(--glow);color:var(--accent-text)}
-.site-status.blocked .site-status-icon,.site-status.outdated .site-status-icon{background:#f5b94222;color:#d99a1e}
+.site-status.blocked .site-status-icon,.site-status.outdated .site-status-icon,.site-status.foreign .site-status-icon{background:#f5b94222;color:#d99a1e}
 .spin{animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
 .site-cta{display:flex;flex-wrap:wrap;gap:10px;margin-top:20px}
 .site-button{height:44px;padding:0 18px;display:inline-flex;align-items:center;justify-content:center;gap:8px;border:1px solid var(--border);border-radius:11px;background:var(--panel);color:var(--text);font:600 14px 'DM Sans',sans-serif;text-decoration:none;cursor:pointer;transition:transform .15s,border-color .15s,background .15s}

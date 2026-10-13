@@ -2,7 +2,7 @@
 
 Editor e serviço Linux para o Ulanzi Deck Dock D200H, com diagnóstico, perfis locais, execução de ações e envio do perfil completo de ícones para o LCD em unidades compatíveis.
 
-**Site e editor online:** https://deckforge-d200h.vercel.app. O site roda no navegador e configura o D200H pelo DeckForge instalado no seu Linux, depois de `deckforge online on` (veja [Editor online](#editor-online)).
+**Site e editor online:** https://ulanzi-d200h-linux.vercel.app. O site roda no navegador e configura o D200H pelo DeckForge instalado no seu Linux, depois de `deckforge online on` (veja [Editor online](#editor-online)).
 
 ## Estado atual
 
@@ -62,13 +62,13 @@ No GNOME Wayland, `wtype` é recusado pelo compositor; os atalhos usam `ydotool`
 
 ## Editor online
 
-O mesmo editor é publicado na Vercel (https://deckforge-d200h.vercel.app). Sem o DeckForge local, o site mostra a página do projeto e a instalação; com ele, conecta pelo navegador em `127.0.0.1:8765`.
+O mesmo editor é publicado na Vercel (https://ulanzi-d200h-linux.vercel.app). Sem o DeckForge local, o site mostra a página do projeto e a instalação; com ele, conecta pelo navegador em `127.0.0.1:8765`.
 
 - A API só aceita o endereço exato do site (`HOSTED_ORIGINS` em `api.py`; `DECKFORGE_HOSTED_ORIGINS` troca a lista, por exemplo para um domínio próprio) e só depois de `deckforge online on`. Antes disso o site vê apenas `/api/hello`; outros sites continuam recusados.
 - Um site com permissão pode criar teclas que executam comandos: permita só se confiar no site e bloqueie com `deckforge online off`. O editor local em `http://127.0.0.1:8765` não depende dessa permissão.
 - O Chrome e o Edge pedem permissão de "rede local" na primeira conexão; a API responde ao preflight de Private Network Access.
 
-Publicação: na Vercel, importe este repositório com **Root Directory** `apps/desktop` e nome de projeto `deckforge-d200h`; `apps/desktop/vercel.json` define o build (`npm run build` → `dist`) e os cabeçalhos de segurança (CSP que só permite conexões com o próprio site e com `127.0.0.1:8765`).
+Publicação: na Vercel, importe este repositório com **Root Directory** `apps/desktop` (o projeto `ulanzi-d200h-linux` publica em https://ulanzi-d200h-linux.vercel.app; um domínio próprio entra em `DECKFORGE_HOSTED_ORIGINS` ou em `HOSTED_ORIGINS`); `apps/desktop/vercel.json` define o build (`npm run build` → `dist`) e os cabeçalhos de segurança (CSP que só permite conexões com o próprio site e com `127.0.0.1:8765`).
 
 ## Desenvolvimento
 

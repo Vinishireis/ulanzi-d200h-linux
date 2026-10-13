@@ -121,7 +121,7 @@ if __name__ == "__main__":
 class HostedEditorTests(unittest.TestCase):
     """The Vercel editor calls this API from the user's browser, only after a local opt-in."""
 
-    SITE = "https://deckforge-d200h.vercel.app"
+    SITE = "https://ulanzi-d200h-linux.vercel.app"
 
     def setUp(self):
         api.store.save_settings({"online_editor": False})

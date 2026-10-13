@@ -28,7 +28,7 @@ app = FastAPI(title="DeckForge Linux", version="0.1.0", docs_url=None, redoc_url
 # allows it locally (setting online_editor). DECKFORGE_HOSTED_ORIGINS
 # (comma-separated) replaces the list, e.g. for a custom domain.
 HOSTED_ORIGINS = frozenset(o.strip().rstrip("/") for o in os.environ.get(
-    "DECKFORGE_HOSTED_ORIGINS", "https://deckforge-d200h.vercel.app").split(",") if o.strip())
+    "DECKFORGE_HOSTED_ORIGINS", "https://ulanzi-d200h-linux.vercel.app").split(",") if o.strip())
 # The Vite editor runs on port 1420 while the local API uses 8765. Its JSON
 # requests trigger browser preflights, which must be answered before routing.
 app.add_middleware(
