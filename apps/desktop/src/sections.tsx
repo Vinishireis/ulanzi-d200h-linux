@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Activity, AppWindow, Cable, CircleCheck, CircleX, Clock3, Command, Download, FileText, Globe, Keyboard, Layers3, Monitor, Moon, Music, Play, Plug, Radio, RefreshCw, Search, ShieldCheck, Sun, SunDim, Terminal, TriangleAlert, Upload, Zap } from 'lucide-react';
+import { Activity, AppWindow, Cable, CircleCheck, CircleX, Clock3, Command, Download, FileText, FolderOpen, Globe, Keyboard, Layers3, Monitor, Moon, Music, Play, Plug, Radio, RefreshCw, Search, ShieldCheck, Sun, SunDim, Terminal, TriangleAlert, Upload, Zap } from 'lucide-react';
 import { api, ButtonConfig, InstalledApp, Status } from './api';
 
 export const slotKeys = Array.from({ length: 13 }, (_, i) => `${Math.floor(i / 5)}_${i % 5}`);
@@ -89,6 +89,7 @@ export function describe(config: ButtonConfig) {
     case 'keys': return (config.keys ?? []).join('+');
     case 'text': return `digitar “${(config.text ?? '').slice(0, 24)}${(config.text ?? '').length > 24 ? '…' : ''}”`;
     case 'profile': return config.profile === 'next' ? 'próximo perfil' : config.profile === 'previous' ? 'perfil anterior' : 'trocar perfil';
+    case 'page': return ({ back: 'voltar à página anterior', home: 'ir ao início', next: 'próxima página', previous: 'página anterior' } as Record<string, string>)[config.page ?? ''] ?? 'abrir página';
     case 'multi': return `${config.steps?.length ?? 0} passos`;
     case 'none': return 'somente exibição';
     default: return (config.argv ?? []).join(' ');
@@ -102,6 +103,7 @@ const presets: Preset[] = [
   ...([['Nova aba', ['ctrl', 't']], ['Reabrir aba fechada', ['ctrl', 'shift', 't']], ['Fechar aba', ['ctrl', 'w']], ['Recarregar página', ['F5']], ['Próxima aba', ['ctrl', 'Tab']]] as [string, string[]][]).map(([title, keys]) => ({ title, group: 'Navegador', icon: Globe, action: { type: 'keys' as const, title, keys } })),
   ...([['GitHub', 'https://github.com'], ['YouTube', 'https://www.youtube.com'], ['Gmail', 'https://mail.google.com'], ['Spotify Web', 'https://open.spotify.com'], ['ChatGPT', 'https://chatgpt.com'], ['Claude', 'https://claude.ai']] as [string, string][]).map(([title, url]) => ({ title, group: 'Sites', icon: Globe, action: { type: 'app' as const, title, argv: ['xdg-open', url] } })),
   ...([['Tocar / pausar', 'playpause', 'pack:streamline:entertainment-control-button-play-pause-button-television-buttons-movies-play-pause-video-controls'], ['Próxima faixa', 'next', 'pack:streamline:button-next-solid'], ['Faixa anterior', 'previous', 'pack:streamline:button-previous-solid'], ['Aumentar volume', 'volumeup', 'pack:streamline:volume-level-high-solid'], ['Diminuir volume', 'volumedown', 'pack:streamline:volume-down-solid'], ['Silenciar', 'mute', 'pack:streamline:volume-mute-solid'], ['Parar', 'stop', 'pack:streamline:button-stop-solid']] as [string, string, string][]).map(([title, key, icon]) => ({ title, group: 'Mídia', icon: Music, action: { type: 'keys' as const, title, keys: [key], icon } })),
+  ...([['Voltar', 'back', 'pack:streamline:arrow-round-left-solid'], ['Início', 'home', 'pack:streamline:home-3-solid'], ['Próxima página', 'next', 'pack:streamline:arrow-round-right-solid'], ['Página anterior', 'previous', 'pack:streamline:arrow-round-left-solid']] as [string, string, string][]).map(([title, page, icon]) => ({ title, group: 'Perfis e páginas', icon: FolderOpen, action: { type: 'page' as const, title, page, icon } })),
   { title: 'Próximo perfil', group: 'Perfis e páginas', icon: Layers3, action: { type: 'profile', title: 'Próximo perfil', profile: 'next', icon: 'pack:streamline:arrow-round-right-solid' } },
   { title: 'Perfil anterior', group: 'Perfis e páginas', icon: Layers3, action: { type: 'profile', title: 'Perfil anterior', profile: 'previous', icon: 'pack:streamline:arrow-round-left-solid' } },
   { title: 'Terminal', group: 'Aplicativos', icon: Terminal, action: { type: 'app', title: 'Terminal', argv: ['x-terminal-emulator'] } },
@@ -178,7 +180,7 @@ export function SettingsPage({ status, dark, setDark, onImported, notify }: { st
     onError: (e: Error) => notify(e.message),
   });
   const importProfile = useMutation({
-    mutationFn: async (file: File) => { const data = JSON.parse(await file.text()); if (data?.format !== 'deckforge-profile' || typeof data.buttons !== 'object') throw new Error('Arquivo não é um perfil DeckForge exportado.'); return api.importProfile({ name: `${String(data.name ?? 'Perfil').slice(0, 70)} (importado)`, buttons: data.buttons }); },
+    mutationFn: async (file: File) => { const data = JSON.parse(await file.text()); if (data?.format !== 'deckforge-profile' || typeof data.buttons !== 'object') throw new Error('Arquivo não é um perfil DeckForge exportado.'); return api.importProfile({ name: `${String(data.name ?? 'Perfil').slice(0, 70)} (importado)`, buttons: data.buttons, pages: Array.isArray(data.pages) ? data.pages : [] }); },
     onSuccess: (result) => { onImported(); notify(`Perfil “${result.name}” importado. Ative-o em Perfis.`); },
     onError: (e: Error) => notify(`Importação falhou: ${e.message}`),
   });

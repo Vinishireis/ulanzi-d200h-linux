@@ -1,12 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowDown, ArrowUp, Check, Clock3, Image, Keyboard, Link2, Play, Plus, Trash2, Upload, X } from 'lucide-react';
-import { api, ButtonConfig, iconImage, InstalledApp, Step, StepAction } from './api';
+import { ArrowDown, ArrowUp, Check, Clock3, FolderPlus, Image, Keyboard, Link2, Play, Plus, Trash2, Upload, X } from 'lucide-react';
+import { api, ButtonConfig, iconImage, InstalledApp, Page, Step, StepAction } from './api';
 
 export const WIDE_KEY = '2_3';
 export const MEDIA_KEYS: [string, string][] = [['playpause', 'Tocar / pausar'], ['next', 'Próxima faixa'], ['previous', 'Faixa anterior'], ['stop', 'Parar'], ['volumeup', 'Aumentar volume'], ['volumedown', 'Diminuir volume'], ['mute', 'Silenciar']];
 type UiType = ButtonConfig['type'] | 'media';
-const actionOptions: [UiType, string][] = [['keys', 'Atalho de teclado'], ['media', 'Tecla de mídia'], ['app', 'Abrir aplicativo ou site'], ['command', 'Comando (argv seguro)'], ['text', 'Digitar texto'], ['profile', 'Trocar perfil (página)'], ['multi', 'Multi-ação (sequência)'], ['none', 'Sem ação (somente exibição)']];
+const actionOptions: [UiType, string][] = [['keys', 'Atalho de teclado'], ['media', 'Tecla de mídia'], ['app', 'Abrir aplicativo ou site'], ['command', 'Comando (argv seguro)'], ['text', 'Digitar texto'], ['page', 'Abrir página (pasta)'], ['profile', 'Trocar perfil'], ['multi', 'Multi-ação (sequência)'], ['none', 'Sem ação (somente exibição)']];
 const keyMap: Record<string, string> = { ' ': 'space', Enter: 'return', Escape: 'escape', Backspace: 'backspace', Delete: 'delete', Tab: 'tab', Home: 'home', End: 'end', ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right', PageUp: 'pageup', PageDown: 'pagedown', Insert: 'insert', PrintScreen: 'print', ContextMenu: 'menu', MediaPlayPause: 'playpause', MediaTrackNext: 'next', MediaTrackPrevious: 'previous', AudioVolumeUp: 'volumeup', AudioVolumeDown: 'volumedown', AudioVolumeMute: 'mute' };
+
+/** Navigation targets of a page key besides a specific page. */
+export const PAGE_TARGETS: [string, string][] = [['back', 'Voltar (página anterior)'], ['home', 'Início do perfil'], ['next', 'Próxima página'], ['previous', 'Página anterior na ordem']];
+
+/** What a double tap on the wide display does; the next page when not configured. */
+export function doubleTapLabel(config: ButtonConfig | undefined, pages: Page[] = []) {
+  const tap = config?.double_tap ?? { type: 'page' as const, page: 'next' };
+  if (tap.type === 'none') return 'nada';
+  if (tap.type !== 'page') return 'ação personalizada';
+  return PAGE_TARGETS.find(([t]) => t === tap.page)?.[1].toLowerCase() ?? `abrir “${pages.find((p) => p.id === tap.page)?.name ?? 'página excluída'}”`;
+}
 
 export function uiTypeOf(config: ButtonConfig): UiType {
   return config.type === 'keys' && config.keys?.length === 1 && MEDIA_KEYS.some(([k]) => k === config.keys![0]) ? 'media' : config.type;
@@ -107,13 +118,19 @@ export function LcdPreview({ keyId, config }: { keyId: string; config: ButtonCon
 type EditorProps = {
   keyId: string; hardwareInput?: string; editor: ButtonConfig; setEditor: (config: ButtonConfig) => void; saved?: ButtonConfig;
   apps: InstalledApp[]; profiles: { id: string; name: string; active: number }[]; backend?: string | null;
+  pages: Page[]; activePageId?: string; onCreatePage: (name: string) => Promise<string>;
   onSave: () => void; onClear: () => void; onTest: () => void; onClose: () => void; onChooseIcon: () => void; saving: boolean; testing: boolean;
 };
 
-export function KeyEditor({ keyId, hardwareInput, editor, setEditor, saved, apps, profiles, backend, onSave, onClear, onTest, onClose, onChooseIcon, saving, testing }: EditorProps) {
+export function KeyEditor({ keyId, hardwareInput, editor, setEditor, saved, apps, profiles, backend, pages, activePageId, onCreatePage, onSave, onClear, onTest, onClose, onChooseIcon, saving, testing }: EditorProps) {
   const wide = keyId === WIDE_KEY;
   const uiType = uiTypeOf(editor);
   const [autoIcon, setAutoIcon] = useState('');
+  const [creatingPage, setCreatingPage] = useState(false);
+  const createPageForKey = async () => {
+    setCreatingPage(true);
+    try { set({ type: 'page', page: await onCreatePage(editor.title.trim() || 'Nova página') }); } catch { /* onCreatePage already showed the error */ } finally { setCreatingPage(false); }
+  };
   const set = (patch: Partial<ButtonConfig>) => setEditor({ ...editor, ...patch });
   const appMatch = useMemo(() => (editor.type === 'app' || editor.type === 'command') ? matchApp(editor.argv, apps) : undefined, [editor.type, editor.argv, apps]);
   const lastArgv = useRef('');
@@ -127,13 +144,13 @@ export function KeyEditor({ keyId, hardwareInput, editor, setEditor, saved, apps
   }, [appMatch]);
   const chooseType = (value: UiType) => {
     if (value === 'media') return set({ type: 'keys', keys: ['playpause'], title: editor.title || 'Tocar / pausar' });
-    const defaults: Partial<ButtonConfig> = value === 'keys' ? { keys: editor.keys?.length ? editor.keys : ['ctrl', 'c'] } : value === 'app' || value === 'command' ? { argv: editor.argv ?? [] } : value === 'text' ? { text: editor.text ?? '' } : value === 'profile' ? { profile: editor.profile ?? 'next' } : value === 'multi' ? { steps: editor.steps?.length ? editor.steps : [{ action: { type: 'keys', keys: ['ctrl', 'c'] }, delay_ms: 0 }] } : {};
+    const defaults: Partial<ButtonConfig> = value === 'keys' ? { keys: editor.keys?.length ? editor.keys : ['ctrl', 'c'] } : value === 'app' || value === 'command' ? { argv: editor.argv ?? [] } : value === 'text' ? { text: editor.text ?? '' } : value === 'profile' ? { profile: editor.profile ?? 'next' } : value === 'page' ? { page: editor.page ?? 'back' } : value === 'multi' ? { steps: editor.steps?.length ? editor.steps : [{ action: { type: 'keys', keys: ['ctrl', 'c'] }, delay_ms: 0 }] } : {};
     set({ type: value, ...defaults });
   };
   const iconColorMode = editor.icon_color === 'original' ? 'original' : editor.icon_color ? 'custom' : 'auto';
   const displayMode = editor.display?.mode ?? 'clock';
   const renderer = editor.display?.renderer ?? 'deckforge';
-  const setDisplay = (patch: Partial<NonNullable<ButtonConfig['display']>>) => set({ display: { mode: displayMode, clock_format: editor.display?.clock_format ?? '24h', renderer, show_date: editor.display?.show_date ?? true, ...patch } });
+  const setDisplay = (patch: Partial<NonNullable<ButtonConfig['display']>>) => set({ display: { mode: displayMode, clock_format: editor.display?.clock_format ?? '24h', renderer, show_date: editor.display?.show_date ?? true, style: editor.display?.style ?? 'classic', ...patch } });
   const hostDrawn = !wide || displayMode === 'image' || renderer === 'deckforge';
   const titleMode = editor.title_position ?? 'auto';
   return <div className="card editor-card">
@@ -149,8 +166,17 @@ export function KeyEditor({ keyId, hardwareInput, editor, setEditor, saved, apps
         <option value="clock">Relógio</option><option value="stats">Estatísticas do sistema (CPU, RAM, GPU)</option><option value="image">Imagem personalizada (sua imagem, ícone e título)</option>
       </select>
       {displayMode !== 'image' && <><label className="field-label">Desenho</label><div className="segmented"><button type="button" className={renderer === 'deckforge' ? 'active' : ''} onClick={() => setDisplay({ renderer: 'deckforge' })}>DeckForge (sem marca)</button><button type="button" className={renderer === 'firmware' ? 'active' : ''} onClick={() => setDisplay({ renderer: 'firmware' })}>Firmware Ulanzi</button></div></>}
+      {displayMode === 'clock' && renderer === 'deckforge' && <><label className="field-label">Estilo do relógio</label><div className="segmented">{([['classic', 'Clássico'], ['dev', 'Dev (código animado)']] as const).map(([style, label]) => <button key={style} type="button" className={(editor.display?.style ?? 'classic') === style ? 'active' : ''} onClick={() => setDisplay({ style })}>{label}</button>)}</div>{editor.display?.style === 'dev' && <div className="field-note">Editor de código com a hora e um terminal digitando um comando diferente a cada minuto. É um GIF que o próprio D200H anima, então não pisca; o DeckForge só envia um novo quando o minuto muda.</div>}</>}
       {displayMode === 'clock' && <><label className="field-label">Formato da hora</label><div className="segmented">{(['24h', '12h'] as const).map((f) => <button key={f} type="button" className={(editor.display?.clock_format ?? '24h') === f ? 'active' : ''} onClick={() => setDisplay({ clock_format: f })}>{f === '24h' ? '24 horas' : '12 horas'}</button>)}{renderer === 'deckforge' && <button type="button" className={editor.display?.show_date !== false ? 'active' : ''} onClick={() => setDisplay({ show_date: editor.display?.show_date === false })}>Mostrar data</button>}</div></>}
-      <div className="field-note">{displayMode === 'image' ? 'A imagem 392×196 da prévia é enviada ao LCD. Use “Imagem de fundo” abaixo para enviar uma foto do computador ou colar um link.' : renderer === 'deckforge' ? 'O DeckForge desenha a área inteira (sem o fundo com a marca Ulanzi) e a atualiza a cada minuto (relógio) ou a cada 4 s (estatísticas). Fundo, ícone e cores podem ser personalizados abaixo.' : 'O firmware desenha a tela com o fundo de marca Ulanzi; o DeckForge envia só a hora e os valores a cada 2 s.'}</div>
+      <div className="field-note">{displayMode === 'image' ? 'A imagem 392×196 da prévia é enviada ao LCD. Use “Imagem de fundo” abaixo para enviar uma foto do computador ou colar um link.' : displayMode === 'stats' && renderer === 'deckforge' ? 'O DeckForge envia o fundo (cor ou imagem) uma única vez e o firmware desenha CPU, RAM e GPU sobre ele a cada 2 s. Sem reenviar imagens, os valores não somem nem piscam; os números usam a fonte do firmware.' : renderer === 'deckforge' ? 'O DeckForge desenha a área inteira (sem o fundo com a marca Ulanzi) e redesenha o relógio a cada minuto. Fundo, ícone e cores podem ser personalizados abaixo.' : 'O firmware desenha a tela com o fundo de marca Ulanzi; o DeckForge envia só a hora e os valores a cada 2 s.'}</div>
+      <label className="field-label">Toque duplo na área larga</label>
+      <select className="input" value={editor.double_tap?.type === 'none' ? 'none' : editor.double_tap?.type === 'page' ? editor.double_tap.page ?? 'next' : editor.double_tap ? 'custom' : 'next'} onChange={(e) => set({ double_tap: e.target.value === 'none' ? { type: 'none' } : { type: 'page', page: e.target.value } })}>
+        {PAGE_TARGETS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+        <optgroup label="Abrir uma página">{pages.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</optgroup>
+        {editor.double_tap && editor.double_tap.type !== 'page' && editor.double_tap.type !== 'none' && <option value="custom" disabled>Ação personalizada</option>}
+        <option value="none">Nada (o toque simples responde na hora)</option>
+      </select>
+      <div className="field-note">Dois toques em até 0,4 s. Enquanto houver uma ação de toque duplo, o toque simples espera 0,4 s para confirmar que não veio um segundo toque.</div>
     </>}
 
     <label className="field-label">Nome {wide ? '' : 'exibido na tecla'}</label>
@@ -168,7 +194,10 @@ export function KeyEditor({ keyId, hardwareInput, editor, setEditor, saved, apps
       <div className="field-note">Executado sem shell, com argumentos separados. Um endereço http(s) abre no navegador padrão.{autoIcon && <> <b>Ícone de “{autoIcon}” aplicado automaticamente.</b></>}</div>
     </>}
     {uiType === 'text' && <><label className="field-label">Texto a digitar <span>{(editor.text ?? '').length}/1000</span></label><textarea className="input textarea" maxLength={1000} value={editor.text ?? ''} onChange={(e) => set({ text: e.target.value })} placeholder="Ex.: Atenciosamente, Vinicius" /><div className="field-note">Digitado na janela em foco.{backend === 'ydotool' && ' No GNOME Wayland (ydotool) apenas caracteres ASCII: acentos e emoji são recusados com erro.'}</div></>}
-    {uiType === 'profile' && <><label className="field-label">Perfil de destino</label><select className="input" value={editor.profile ?? 'next'} onChange={(e) => set({ profile: e.target.value })}><option value="next">Próximo perfil (como trocar de página)</option><option value="previous">Perfil anterior</option>{profiles.map((p) => <option key={p.id} value={p.id}>{p.name}{p.active ? ' (ativo)' : ''}</option>)}</select><div className="field-note">Ao trocar, os ícones do novo perfil são enviados ao LCD. Crie em todos os perfis uma tecla “Voltar” para navegar como pastas.</div></>}
+    {uiType === 'profile' && <><label className="field-label">Perfil de destino</label><select className="input" value={editor.profile ?? 'next'} onChange={(e) => set({ profile: e.target.value })}><option value="next">Próximo perfil (como trocar de página)</option><option value="previous">Perfil anterior</option>{profiles.map((p) => <option key={p.id} value={p.id}>{p.name}{p.active ? ' (ativo)' : ''}</option>)}</select><div className="field-note">Ao trocar, os ícones do novo perfil são enviados ao LCD e ele abre na página inicial. Para pastas dentro deste perfil, use “Abrir página”.</div></>}
+    {uiType === 'page' && <><label className="field-label">Página de destino</label><select className="input" value={editor.page ?? 'back'} onChange={(e) => set({ page: e.target.value })}>{PAGE_TARGETS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}<optgroup label="Páginas deste perfil">{pages.map((p) => <option key={p.id} value={p.id} disabled={p.id === activePageId}>{p.name}{p.id === activePageId ? ' (esta página)' : ''}</option>)}{editor.page && !PAGE_TARGETS.some(([t]) => t === editor.page) && !pages.some((p) => p.id === editor.page) && <option value={editor.page}>Página excluída</option>}</optgroup></select>
+      <button type="button" className="button secondary page-create" disabled={creatingPage} onClick={createPageForKey}><FolderPlus size={14} /> {creatingPage ? 'Criando página…' : `Criar página “${editor.title.trim() || 'Nova página'}” para esta tecla`}</button>
+      <div className="field-note">Cada página tem suas 13 teclas; a área larga é a mesma em todas. Uma página nova já vem com a tecla “Voltar” na posição 0_0. Salve esta tecla e abra a página nas abas acima da grade para configurá-la.</div></>}
     {uiType === 'multi' && <><label className="field-label">Passos <span>executados em ordem; para no primeiro erro</span></label><StepsEditor steps={editor.steps ?? []} onChange={(steps) => set({ steps })} /></>}
     {uiType === 'none' && <div className="field-note">A tecla só exibe a imagem; pressioná-la é registrado nos Logs sem executar nada.</div>}
 

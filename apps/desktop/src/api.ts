@@ -1,8 +1,11 @@
-export type ActionType = 'keys' | 'app' | 'command' | 'text' | 'multi' | 'profile' | 'none';
+export type ActionType = 'keys' | 'app' | 'command' | 'text' | 'multi' | 'profile' | 'page' | 'none';
 export type StepAction = { type: 'keys' | 'app' | 'command' | 'text'; keys?: string[]; argv?: string[]; text?: string };
 export type Step = { action: StepAction; delay_ms: number };
-export type DisplayConfig = { mode: 'clock' | 'stats' | 'image'; clock_format?: '24h' | '12h'; renderer?: 'deckforge' | 'firmware'; show_date?: boolean };
-export type ButtonConfig = { type: ActionType; title: string; keys?: string[]; argv?: string[]; text?: string; profile?: string; steps?: Step[]; color?: string; icon?: string; icon_color?: string; background?: string; background_fit?: 'cover' | 'contain'; title_position?: 'none' | 'top' | 'middle' | 'bottom'; title_color?: string; display?: DisplayConfig };
+export type DisplayConfig = { mode: 'clock' | 'stats' | 'image'; clock_format?: '24h' | '12h'; renderer?: 'deckforge' | 'firmware'; show_date?: boolean; style?: 'classic' | 'dev' };
+export type ButtonConfig = { type: ActionType; title: string; keys?: string[]; argv?: string[]; text?: string; profile?: string; page?: string; steps?: Step[]; color?: string; icon?: string; icon_color?: string; background?: string; background_fit?: 'cover' | 'contain'; title_position?: 'none' | 'top' | 'middle' | 'bottom'; title_color?: string; display?: DisplayConfig; double_tap?: { type: ActionType; page?: string; profile?: string } };
+/** A page of the active profile; 'home' is the profile's first page. keys: configured keys on it. */
+export type Page = { id: string; name: string; keys: number };
+export type ActivePage = { id: string; name: string; history: string[] };
 export type IconSet = { id: string; name: string; total: number; palette: boolean; license: string; author: string; categories: { name: string; total: number }[] };
 export type IconHit = { ref: string; name: string; set: string; palette: boolean };
 export type UserIcon = { ref: string; name: string };
@@ -26,14 +29,15 @@ export type Status = {
   daemon: { running: boolean; intercept_keyboard: boolean | null; mode?: string; pid: number | null; build?: string | null; stale?: boolean };
   runtime: { capture: CaptureState; host_link: HostLink | null; device_info: DeviceInfo | null; last_button: LastButton | null; last_action: LastAction | null };
   settings: Settings;
-  devices: Device[]; profile: { id: string; name: string } | null; configured_buttons: number;
+  devices: Device[]; profile: { id: string; name: string } | null; page: ActivePage | null; configured_buttons: number;
   session: { session_type: string; desktop: string }; events: EventRow[];
 };
 export type SyncResult = { ok: boolean; keys: string[]; slots?: string[]; bytes: number; frames: number; acknowledged?: boolean; message: string };
 export type TestResult = { ok: boolean | null; scheduled: boolean; message: string };
 export type Integration = { id: string; name: string; ok: boolean; detail: string; fix: string | null };
 export type MacroRow = { hid_slot: number; windows: string; mac: string };
-export type ProfileExport = { format: 'deckforge-profile'; version: number; name: string; buttons: Record<string, ButtonConfig> };
+export type PageExport = { id: string; name: string; buttons: Record<string, ButtonConfig> };
+export type ProfileExport = { format: 'deckforge-profile'; version: number; name: string; buttons: Record<string, ButtonConfig>; pages?: PageExport[] };
 
 const base = 'http://127.0.0.1:8765/api';
 /** Icon exactly as the LCD renders it (same rasterizer and tint). color: undefined = automatic. */
@@ -64,7 +68,12 @@ export const api = {
   renameProfile: (id: string, name: string) => request(`/profiles/${id}`, json('PATCH', { name })),
   deleteProfile: (id: string) => request(`/profiles/${id}`, json('DELETE')),
   exportProfile: (id: string) => request<ProfileExport>(`/profiles/${id}/export`),
-  importProfile: (data: { name: string; buttons: Record<string, ButtonConfig> }) => request<{id:string;name:string}>('/profiles/import', json('POST', data)),
+  pages: () => request<{ active: ActivePage; pages: Page[] }>('/pages'),
+  createPage: (name: string, back = true) => request<{ id: string; name: string }>('/pages', json('POST', { name, back })),
+  renamePage: (id: string, name: string) => request(`/pages/${id}`, json('PATCH', { name })),
+  deletePage: (id: string) => request<{ active: ActivePage }>(`/pages/${id}`, json('DELETE')),
+  activatePage: (id: string) => request<ActivePage>(`/pages/${id}/activate`, json('POST')),
+  importProfile: (data: { name: string; buttons: Record<string, ButtonConfig>; pages?: PageExport[] }) => request<{id:string;name:string}>('/profiles/import', json('POST', data)),
   events: (limit = 100) => request<EventRow[]>(`/events?limit=${limit}`),
   settings: () => request<Settings>('/settings'),
   saveSettings: (data: Partial<Settings>) => request<Settings>('/settings', json('PUT', data)),
