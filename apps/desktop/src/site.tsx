@@ -179,7 +179,7 @@ function Site({ status, onRetry, onEnter }: { status: Probe; onRetry: () => void
 
       <footer className="site-footer">
         <span>DeckForge · código aberto (MIT) · sem vínculo com a Ulanzi</span>
-        <span>Feito por <a href="https://portfolioreact-alpha-two.vercel.app" target="_blank" rel="noreferrer">Vinícius Nishimura Reis</a>
+        <span>Feito por <a href="https://www.vinishireis.dev.br" target="_blank" rel="noreferrer">Vinícius Nishimura Reis</a>
           <a className="site-icon-btn small" href="https://github.com/Vinishireis" target="_blank" rel="noreferrer" aria-label="GitHub de Vinícius"><Github size={15} /></a>
           <a className="site-icon-btn small" href="https://www.linkedin.com/in/vinicius-nishimura-reis/" target="_blank" rel="noreferrer" aria-label="LinkedIn de Vinícius"><Linkedin size={15} /></a></span>
       </footer>
