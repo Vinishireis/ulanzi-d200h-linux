@@ -1,5 +1,7 @@
 import isolation  # noqa: F401  (must precede deckforge imports)
 import asyncio
+import contextlib
+import io
 import os
 import signal
 import socket
@@ -8,7 +10,9 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from deckforge import build_id, cli
 from deckforge.processes import deckforge_role, pid_alive, terminate
 
 REPO = Path(__file__).resolve().parents[2]
@@ -102,6 +106,55 @@ class PidState(unittest.TestCase):
             time.sleep(.02)
         self.assertFalse(pid_alive(child.pid))  # exited but not yet reaped
         child.wait()
+
+
+class Autostart(unittest.TestCase):
+    """`restart` and `stop` with the systemd user unit that starts DeckForge at login."""
+
+    def systemctl(self, enabled):
+        calls = []
+
+        def fake(*args, timeout=10):
+            calls.append(args)
+            out = {"is-enabled": "enabled" if enabled else "disabled", "is-active": "active"}.get(args[0], "")
+            return subprocess.CompletedProcess(["systemctl", "--user", *args], 0, stdout=out + "\n", stderr="")
+        return fake, calls
+
+    def restart(self, enabled):
+        fake, calls = self.systemctl(enabled)
+        with mock.patch.object(cli, "_systemctl", fake), mock.patch.object(cli, "_stop", return_value=0), \
+             mock.patch.object(cli, "_serve", return_value=0) as serve, \
+             mock.patch.object(cli, "api_status", return_value={"build": build_id()}), \
+             mock.patch.object(sys, "argv", ["deckforge", "restart"]), contextlib.redirect_stdout(io.StringIO()):
+            code = cli.main()
+        return code, calls, serve
+
+    def test_restart_goes_through_systemd_when_autostart_is_enabled(self):
+        code, calls, serve = self.restart(enabled=True)
+        self.assertEqual(code, 0)
+        self.assertIn(("start", cli.SERVICE), calls)
+        serve.assert_not_called()  # nothing tied to this terminal
+
+    def test_restart_without_autostart_serves_in_this_terminal(self):
+        code, calls, serve = self.restart(enabled=False)
+        self.assertEqual(code, 0)
+        serve.assert_called_once_with(open_browser=False)
+        self.assertNotIn(("start", cli.SERVICE), calls)
+
+    def test_stop_stops_the_units_before_killing_processes(self):
+        fake, calls = self.systemctl(enabled=True)
+        with mock.patch.object(cli, "_systemctl", fake), mock.patch.object(cli, "find_processes", return_value=[]), \
+             mock.patch.object(cli, "daemon_status", return_value={"running": False}), \
+             mock.patch.object(cli, "port_in_use", return_value=False), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli._stop(), 0)
+        self.assertEqual(calls, [("stop", cli.SERVICE), ("stop", cli.LEGACY_SERVICE)])
+
+    def test_unit_starts_serve_with_the_graphical_session(self):
+        unit = (REPO / "installers/systemd/deckforge.service").read_text()
+        # scripts/enable-autostart.sh rewrites exactly this line to the project's .venv.
+        self.assertRegex(unit, r"(?m)^ExecStart=%h/\.local/bin/deckforge serve$")
+        self.assertRegex(unit, r"(?m)^WantedBy=graphical-session\.target$")
+        self.assertRegex(unit, r"(?m)^PartOf=graphical-session\.target$")
 
 
 if __name__ == "__main__":

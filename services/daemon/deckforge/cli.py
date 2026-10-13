@@ -19,6 +19,10 @@ from .store import DATA_HOME, ProfileStore
 from .transport import HidTransport
 
 SLOTS = [f"{r}_{c}" for r in range(3) for c in range(5) if not (r == 2 and c > 2)]
+# systemd user unit that starts `deckforge serve` with the graphical session
+# (scripts/enable-autostart.sh). The daemon-only unit is from older installs.
+SERVICE = "deckforge.service"
+LEGACY_SERVICE = "deckforge-daemon.service"
 
 def main():
     parser = argparse.ArgumentParser(prog="deckforge", description="Gerencie o Ulanzi D200H no Linux")
@@ -39,11 +43,14 @@ def main():
     sub.add_parser("serve", help="iniciar editor, API local e daemon de ações")
     sub.add_parser("app", help="abrir o editor e iniciar o daemon local de ações")
     sub.add_parser("stop", help="parar somente os processos DeckForge do usuário atual")
-    sub.add_parser("restart", help="parar instâncias antigas e iniciar editor, API e daemon com o código atual")
+    sub.add_parser("restart", help="parar instâncias antigas e iniciar editor, API e daemon com o código atual "
+                                   "(pelo serviço systemd, se a inicialização automática estiver ativa)")
     sub.add_parser("status", help="mostrar dispositivo, captura, backend de atalhos e última ação")
     logs = sub.add_parser("logs", help="mostrar o histórico de eventos do DeckForge")
     logs.add_argument("-n", "--lines", type=int, default=30, help="quantidade de eventos recentes")
     logs.add_argument("-f", "--follow", action="store_true", help="acompanhar novos eventos até Ctrl+C")
+    online = sub.add_parser("online", help="permitir ou bloquear o editor online (deckforge-d200h.vercel.app) neste computador")
+    online.add_argument("state", nargs="?", choices=["on", "off", "status"], default="status")
     trigger = sub.add_parser("trigger", help="executar a ação salva de uma posição sem usar o dispositivo (teste de software)")
     trigger.add_argument("slot", choices=SLOTS, help="posição no formato linha_coluna, por exemplo 0_0")
     args = parser.parse_args()
@@ -116,6 +123,8 @@ def main():
     if args.command == "restart":
         if _stop() != 0:
             return 1
+        if _service_enabled():
+            return _start_service()
         return _serve(open_browser=False)
     if args.command in {"serve", "app"}:
         return _serve(open_browser=args.command == "app")
@@ -127,6 +136,18 @@ def main():
         return 0
     if args.command == "logs":
         return _logs(args.lines, args.follow)
+    if args.command == "online":
+        store = ProfileStore()
+        if args.state != "status":
+            store.save_settings({"online_editor": args.state == "on"})
+        from .api import HOSTED_ORIGINS
+        sites = ", ".join(sorted(HOSTED_ORIGINS))
+        if store.settings()["online_editor"]:
+            print(f"Editor online PERMITIDO: {sites} pode configurar o D200H deste computador pela API local "
+                  "(127.0.0.1:8765). Para bloquear: deckforge online off")
+        else:
+            print(f"Editor online BLOQUEADO: {sites} só vê que o DeckForge está instalado. Para permitir: deckforge online on")
+        return 0
     if args.command == "trigger":
         store = ProfileStore()
         ok, message = run_action(store, args.slot, "teste via `deckforge trigger`")
@@ -134,14 +155,53 @@ def main():
         return 0 if ok else 1
 
 
+def _systemctl(*args: str, timeout: float = 10) -> subprocess.CompletedProcess | None:
+    try:
+        return subprocess.run(["systemctl", "--user", *args], stdin=subprocess.DEVNULL, capture_output=True,
+                              text=True, timeout=timeout, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _service_enabled() -> bool:
+    result = _systemctl("is-enabled", SERVICE, timeout=5)
+    return result is not None and result.stdout.strip() == "enabled"
+
+
+def _start_service() -> int:
+    """Start `deckforge serve` under systemd, so it outlives this terminal."""
+    result = _systemctl("start", SERVICE, timeout=30)
+    if result is None or result.returncode != 0:
+        detail = (result.stderr.strip() if result is not None else "") or "systemctl indisponível"
+        print(f"Não foi possível iniciar {SERVICE}: {detail}", file=sys.stderr)
+        return 1
+    deadline = time.monotonic() + 20
+    running = None
+    while time.monotonic() < deadline:
+        running = api_status()
+        if running is not None:
+            break
+        active = _systemctl("is-active", SERVICE, timeout=5)
+        if active is not None and active.stdout.strip() == "failed":
+            break
+        time.sleep(.25)
+    if running is None:
+        print(f"{SERVICE} não respondeu em 127.0.0.1:8765. Veja `journalctl --user -u {SERVICE} -n 40`.", file=sys.stderr)
+        return 1
+    if running.get("build") != build_id():
+        print(f"Aviso: o serviço usa outra instalação do DeckForge (build {running.get('build') or 'desconhecido'}). "
+              "Rode ./scripts/enable-autostart.sh neste projeto para apontá-lo para este código.", file=sys.stderr)
+    print(f"DeckForge iniciado pelo systemd ({SERVICE}); ele volta sozinho a cada login.\n"
+          "Editor: http://127.0.0.1:8765 · eventos: `deckforge logs -f` · "
+          f"servidor: `journalctl --user -u {SERVICE} -f`", flush=True)
+    return 0
+
+
 def _stop() -> int:
     """Stop every DeckForge process of this user and verify nothing is left."""
-    try:
-        subprocess.run(["systemctl", "--user", "stop", "deckforge-daemon.service"],
-                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                       timeout=5, check=False)
-    except (OSError, subprocess.TimeoutExpired):
-        pass
+    # Through systemd first: a killed service would otherwise be restarted.
+    for unit in (SERVICE, LEGACY_SERVICE):
+        _systemctl("stop", unit)
     processes = find_processes()
     for item in processes:
         print(f"Encerrando PID {item['pid']} (deckforge {item['role']})", flush=True)

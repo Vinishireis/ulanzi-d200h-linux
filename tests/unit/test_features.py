@@ -28,7 +28,7 @@ class WideDisplayProtocol(unittest.TestCase):
         self.assertEqual(small_window_payload({"mode": "image"}), b"2|0|0|00:00:00|0")
         # Default: DeckForge draws the clock, so the firmware stays on BACKGROUND (no Ulanzi branding).
         self.assertEqual(small_window_payload(None), b"2|0|0|00:00:00|0")
-        self.assertEqual(display_settings(None), {"mode": "clock", "clock_format": "24h", "renderer": "deckforge", "show_date": True})
+        self.assertEqual(display_settings(None), {"mode": "clock", "clock_format": "24h", "renderer": "deckforge", "show_date": True, "style": "classic"})
         self.assertEqual(display_settings({"display": {"mode": "bogus"}})["mode"], "clock")
 
     def test_brightness_is_ascii_digits(self):
@@ -152,9 +152,9 @@ class ProfileSwitching(unittest.TestCase):
             second = store.create_profile("Página 2")
             store.save_button("0_4", {"type": "profile", "title": "Próxima", "profile": "next"})
             resynced = []
-            ok, message = run_action(store, "0_4", "teste", on_profile_change=lambda: resynced.append(1))
+            ok, message = run_action(store, "0_4", "teste", on_layout_change=resynced.append)
             self.assertEqual((ok, message, store.active_profile()["id"]), (True, "Perfil ativo: Página 2", second))
-            self.assertEqual(resynced, [1])
+            self.assertEqual(resynced, ["troca de perfil"])
             self.assertIn("Meu primeiro perfil", switch_profile(store, "previous"))
             with self.assertRaises(ActionError):
                 switch_profile(store, "inexistente")
@@ -187,7 +187,7 @@ class ApiShape(unittest.TestCase):
         api.update_button("0_1", cfg)
         api.update_button("2_3", cfg)
         self.assertNotIn("display", api.store.buttons()["0_1"])
-        self.assertEqual(api.store.buttons()["2_3"]["display"], {"mode": "stats", "clock_format": "24h", "renderer": "deckforge", "show_date": True})
+        self.assertEqual(api.store.buttons()["2_3"]["display"], {"mode": "stats", "clock_format": "24h", "renderer": "deckforge", "show_date": True, "style": "classic"})
         self.assertEqual(api.macros()["2_3"]["hid_slot"], 13)
 
     def test_brightness_setting_is_validated(self):

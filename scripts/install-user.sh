@@ -16,8 +16,8 @@ cat > "$HOME/.local/bin/deckforge" <<'EOF'
 exec "$HOME/.local/share/deckforge/venv/bin/deckforge" "$@"
 EOF
 chmod 755 "$HOME/.local/bin/deckforge"
-install -m 644 "$root/installers/systemd/deckforge-daemon.service" "$HOME/.config/systemd/user/deckforge-daemon.service"
+install -m 644 "$root/installers/systemd/deckforge.service" "$HOME/.config/systemd/user/deckforge.service"
 install -m 644 "$root/installers/debian/deckforge.desktop" "$HOME/.local/share/applications/deckforge.desktop"
 systemctl --user daemon-reload
 printf 'Instalado para o usuário. A regra udev não foi instalada. Para revisar: %s\n' "$root/installers/udev/99-deckforge-d200h.rules"
-printf 'Ative o daemon quando estiver pronto: systemctl --user enable --now deckforge-daemon.service\n'
+printf 'Para iniciar com a sessão (ícones e ações voltam após ligar o notebook): %s\n' "$root/scripts/enable-autostart.sh"

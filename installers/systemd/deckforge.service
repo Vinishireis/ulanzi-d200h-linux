@@ -1,0 +1,23 @@
+[Unit]
+Description=DeckForge Linux: editor local, API e daemon do Ulanzi D200H
+# Starts with the graphical session, when WAYLAND_DISPLAY/DISPLAY and the D-Bus
+# session bus are already in the user manager's environment (actions need
+# them), and stops on logout so the dock's keyboard is released.
+PartOf=graphical-session.target
+After=graphical-session.target
+# A persistent failure (broken venv, port taken by another program) must not
+# restart forever; `journalctl --user -u deckforge` shows the reason.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/deckforge serve
+Restart=on-failure
+RestartSec=3
+UMask=0077
+# `serve` exits with 128+SIGTERM after a clean shutdown.
+SuccessExitStatus=143
+
+[Install]
+WantedBy=graphical-session.target

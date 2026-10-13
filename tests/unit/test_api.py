@@ -13,6 +13,16 @@ def save(key, **config):
     return api.update_button(key, api.ButtonConfig(**config))
 
 
+class WidePreviewTests(unittest.TestCase):
+    def test_statistics_preview_shows_real_values_not_zeros(self):
+        api.store.save_button("2_3", {"type": "none", "title": "", "display": {"mode": "stats"}})
+        drawn = []
+        with patch.object(api._metrics, "sample", return_value={"cpu": 42, "mem": 71, "gpu": 0}), \
+             patch.object(api, "render_wide", side_effect=lambda config, metrics=None: drawn.append(metrics) or b"png"):
+            api.render_saved_key("2_3")
+        self.assertEqual(drawn, [{"cpu": 42, "mem": 71, "gpu": 0}])
+
+
 class PersistenceTests(unittest.TestCase):
     def setUp(self):
         self.profile = api.store.create_profile("Teste API")
@@ -106,3 +116,54 @@ class LiveSocketTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HostedEditorTests(unittest.TestCase):
+    """The Vercel editor calls this API from the user's browser, only after a local opt-in."""
+
+    SITE = "https://deckforge-d200h.vercel.app"
+
+    def setUp(self):
+        api.store.save_settings({"online_editor": False})
+
+    @staticmethod
+    def request(method, path, headers):
+        """One HTTP request straight into the ASGI app, as the browser would send it to 127.0.0.1:8765."""
+        scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": method, "scheme": "http",
+                 "path": path, "raw_path": path.encode(), "query_string": b"", "root_path": "",
+                 "headers": [(b"host", b"127.0.0.1:8765"), *((k.lower().encode(), v.encode()) for k, v in headers.items())],
+                 "server": ("127.0.0.1", 8765), "client": ("127.0.0.1", 50000)}
+        sent = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            sent.append(message)
+        asyncio.run(api.app(scope, receive, send))
+        start = next(m for m in sent if m["type"] == "http.response.start")
+        body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+        return start["status"], {k.decode(): v.decode() for k, v in start["headers"]}, body
+
+    def tearDown(self):
+        api.store.save_settings({"online_editor": False})
+
+    def test_site_sees_deckforge_but_cannot_use_it_until_allowed(self):
+        import json
+        status, headers, body = self.request("GET", "/api/hello", {"Origin": self.SITE})
+        self.assertEqual((status, json.loads(body)["online_editor"]), (200, False))
+        self.assertEqual(headers["access-control-allow-origin"], self.SITE)
+        status, _, body = self.request("GET", "/api/buttons", {"Origin": self.SITE})
+        self.assertEqual((status, json.loads(body)["code"]), (403, "online_editor_disabled"))
+        api.store.save_settings({"online_editor": True})
+        self.assertEqual(self.request("GET", "/api/buttons", {"Origin": self.SITE})[0], 200)
+
+    def test_other_sites_stay_blocked_and_local_editor_needs_no_opt_in(self):
+        self.assertEqual(self.request("GET", "/api/hello", {"Origin": "https://evil.example"})[0], 403)
+        self.assertEqual(self.request("GET", "/api/buttons", {"Origin": "http://127.0.0.1:8765"})[0], 200)
+
+    def test_private_network_preflight_is_answered(self):
+        _, headers, _ = self.request("OPTIONS", "/api/buttons", {
+            "Origin": self.SITE, "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Private-Network": "true"})
+        self.assertEqual(headers.get("access-control-allow-private-network"), "true")

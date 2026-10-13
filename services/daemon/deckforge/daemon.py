@@ -37,6 +37,30 @@ _STALE_REPORT_SECONDS = 1.0
 # The DeckForge-drawn statistics image is refreshed at this interval; the
 # clock image only when the minute changes.
 _STATS_REFRESH_SECONDS = 4.0
+# While the host sleeps the dock gets no keep-alive and may fall back to its
+# factory screen without re-enumerating; the profile is sent again on resume.
+_RESUME_GAP_SECONDS = 2.0
+_RESUME_REASON = "retomada após suspensão"
+# Two touches on the wide display within this window are a double tap. While a
+# double-tap action exists, a single touch waits this long before running.
+_DOUBLE_TAP_SECONDS = 0.4
+WIDE_KEY = "2_3"
+DEFAULT_DOUBLE_TAP = {"type": "page", "page": "next"}
+
+
+def double_tap_action(config: dict[str, Any] | None) -> dict[str, Any]:
+    """Action for a double tap on the wide display: the next page unless configured."""
+    action = (config or {}).get("double_tap")
+    return action if isinstance(action, dict) and action.get("type") else DEFAULT_DOUBLE_TAP
+
+
+def _suspended_seconds() -> float:
+    """Total time the system spent suspended since boot.
+
+    CLOCK_BOOTTIME keeps counting during suspend and CLOCK_MONOTONIC does not,
+    so their difference grows by the length of each sleep.
+    """
+    return time.clock_gettime(time.CLOCK_BOOTTIME) - time.clock_gettime(time.CLOCK_MONOTONIC)
 
 
 class _Settings:
@@ -118,11 +142,25 @@ def switch_profile(store: ProfileStore, target: str) -> str:
     return f"Perfil ativo: {chosen['name']}"
 
 
+def switch_page(store: ProfileStore, target: str) -> str:
+    """Show another page of the active profile: a page id, or back/home/next/previous."""
+    try:
+        page = store.navigate_page(target)
+    except ValueError as exc:
+        raise ActionError(str(exc)) from None
+    return f"Página: {page['name']}"
+
+
 def run_action(store: ProfileStore, slot: str, source: str,
                execute: Callable[[dict[str, Any]], str] = execute_action,
-               on_profile_change: Callable[[], None] | None = None) -> tuple[bool, str]:
-    """Execute the action saved for ``slot`` in the active profile and log the real outcome."""
+               on_layout_change: Callable[[str], None] | None = None, gesture: str = "tap") -> tuple[bool, str]:
+    """Execute the action saved for ``slot`` in the active profile and log the real outcome.
+
+    gesture="double" runs the wide display's double-tap action instead.
+    """
     action = store.buttons().get(slot)
+    if gesture == "double":
+        action = {"title": "toque duplo", **double_tap_action(action)}
     title = (action or {}).get("title") or (action or {}).get("type") or "sem título"
     if (not action and slot == "2_3") or (action and action.get("type") == "none"):
         # Display-only key (the wide display by default): a touch is not a failure.
@@ -133,10 +171,14 @@ def run_action(store: ProfileStore, slot: str, source: str,
         ok, message = False, f"O botão {slot} não tem ação configurada no perfil ativo"
     else:
         try:
-            if action.get("type") == "profile":
-                ok, message = True, switch_profile(store, action.get("profile", ""))
-                if on_profile_change is not None:
-                    on_profile_change()
+            if action.get("type") in {"profile", "page"}:
+                # The LCD shows the keys of one profile page; it is redrawn after a switch.
+                if action["type"] == "profile":
+                    ok, message, reason = True, switch_profile(store, action.get("profile", "")), "troca de perfil"
+                else:
+                    ok, message, reason = True, switch_page(store, action.get("page", "")), "troca de página"
+                if on_layout_change is not None:
+                    on_layout_change(reason)
             else:
                 ok, message = True, execute(action)
         except Exception as exc:  # every failure must reach the log, never a false success
@@ -151,10 +193,12 @@ class ActionDispatcher:
     """Run profile actions in press order without blocking the input reader."""
 
     def __init__(self, store: ProfileStore, execute: Callable[[dict[str, Any]], str] = execute_action,
-                 on_profile_change: Callable[[], None] | None = None):
+                 on_layout_change: Callable[[str], None] | None = None, double_tap_seconds: float = _DOUBLE_TAP_SECONDS):
         self.store, self._execute = store, execute
-        self.on_profile_change = on_profile_change
-        self._queue: queue.Queue[tuple[str, str] | None] = queue.Queue(maxsize=32)
+        self.on_layout_change = on_layout_change
+        self._double_tap_seconds = double_tap_seconds
+        self._pending_tap: threading.Timer | None = None
+        self._queue: queue.Queue[tuple[str, str, str] | None] = queue.Queue(maxsize=32)
         self._lock = threading.Lock()
         self._unpaired: dict[tuple[str, str], deque[float]] = {}
         self._thread = threading.Thread(target=self._run, name="deckforge-actions", daemon=True)
@@ -174,8 +218,33 @@ class ActionDispatcher:
             self._unpaired.setdefault((channel, slot), deque()).append(now)
         self.store.log("button", f"Botão físico recebido: {slot} ({source})")
         self.store.set_state("last_button", {"slot": slot, "source": source, "channel": channel, "at": time.time()})
+        if slot == WIDE_KEY and double_tap_action(self.store.buttons().get(WIDE_KEY))["type"] != "none":
+            return self._wide_touch(source)
+        return self._enqueue(slot, source)
+
+    def _wide_touch(self, source: str) -> bool:
+        """First touch waits for a possible second one; the second makes it a double tap."""
+        with self._lock:
+            pending, self._pending_tap = self._pending_tap, None
+            if pending is None:
+                timer = threading.Timer(self._double_tap_seconds, self._single_touch_due, args=(source,))
+                timer.daemon = True
+                self._pending_tap = timer
+                timer.start()
+                return True
+            pending.cancel()
+        return self._enqueue(WIDE_KEY, f"{source}, toque duplo", "double")
+
+    def _single_touch_due(self, source: str) -> None:
+        with self._lock:
+            if self._pending_tap is not threading.current_thread():
+                return  # a second touch already turned it into a double tap
+            self._pending_tap = None
+        self._enqueue(WIDE_KEY, source)
+
+    def _enqueue(self, slot: str, source: str, gesture: str = "tap") -> bool:
         try:
-            self._queue.put_nowait((slot, source))
+            self._queue.put_nowait((slot, source, gesture))
         except queue.Full:
             self.store.log("error", f"Fila de ações cheia; o botão {slot} foi descartado")
             return False
@@ -183,9 +252,14 @@ class ActionDispatcher:
 
     def _run(self) -> None:
         while (item := self._queue.get()) is not None:
-            run_action(self.store, *item, execute=self._execute, on_profile_change=self.on_profile_change)
+            slot, source, gesture = item
+            run_action(self.store, slot, source, execute=self._execute, on_layout_change=self.on_layout_change, gesture=gesture)
 
     def close(self, timeout: float = 5) -> None:
+        with self._lock:
+            if self._pending_tap is not None:
+                self._pending_tap.cancel()
+                self._pending_tap = None
         self._queue.put(None)
         self._thread.join(timeout)
 
@@ -194,8 +268,10 @@ class LcdSyncWorker:
     """Upload the saved profile to the LCD in the background, one at a time."""
 
     def __init__(self, store: ProfileStore, sync: Callable[..., dict[str, Any]] | None = None,
-                 retry_delays: tuple[float, ...] = (2.0, 5.0)):
+                 retry_delays: tuple[float, ...] = (2.0, 5.0),
+                 suspended: Callable[[], float] = _suspended_seconds):
         self.store, self._sync, self._retry_delays = store, sync, retry_delays
+        self._suspended = suspended
         self._pending = threading.Event()
         self._stop = threading.Event()
         self._reason = ""
@@ -207,7 +283,12 @@ class LcdSyncWorker:
         self._pending.set()
 
     def _run(self) -> None:
+        asleep = self._suspended()
         while not self._stop.is_set():
+            now_asleep = self._suspended()
+            if now_asleep - asleep > _RESUME_GAP_SECONDS:
+                self.request(_RESUME_REASON)
+            asleep = now_asleep
             if not self._pending.wait(0.25):
                 continue
             self._pending.clear()
@@ -236,7 +317,13 @@ class LcdSyncWorker:
                                        "o firmware não confirma a renderização")
                 break
             else:
-                self.store.log("error", f"Não foi possível reaplicar o perfil ao LCD ({reason}): {last_error}")
+                if reason == _RESUME_REASON:
+                    # The dock is re-enumerating after the resume; the
+                    # reconnection sends the profile again once it is back.
+                    self.store.log("sync", f"LCD ({reason}): D200H ainda indisponível ({last_error}); "
+                                           "o perfil será reenviado quando ele reconectar")
+                else:
+                    self.store.log("error", f"Não foi possível reaplicar o perfil ao LCD ({reason}): {last_error}")
 
     def close(self, timeout: float = 5) -> None:
         self._stop.set()
@@ -265,6 +352,7 @@ class ControlChannel:
         self._enabled = threading.Event()
         self._stop = threading.Event()
         self._last_press: dict[int, float] = {}
+        self._held: set[int] = set()
         self._reported: set[str] = set()
         self._link: dict[str, Any] = {}
         self._link_written = 0.0
@@ -330,15 +418,26 @@ class ControlChannel:
             self._brightness_sent = brightness
             self.store.log("daemon", f"Brilho do LCD enviado: {brightness}% (o firmware não confirma o valor aplicado)")
         self._refresh_wide(path, display, metrics)
+        from .render import firmware_draws_values
         labels = {"clock": "relógio", "stats": "estatísticas do sistema", "image": "imagem personalizada"}
-        drawn = "desenhado pelo DeckForge" if display["mode"] != "image" and display["renderer"] == "deckforge" else \
-            ("desenhado pelo firmware" if display["mode"] != "image" else "enviada pelo DeckForge")
+        if display["mode"] == "image":
+            drawn = "enviada pelo DeckForge"
+        elif not firmware_draws_values(display):
+            drawn = "desenhado pelo DeckForge"
+        else:
+            drawn = ("valores do firmware sobre o fundo do DeckForge (sem reenviar imagens)"
+                     if display["renderer"] == "deckforge" else "desenhado pelo firmware")
         self._update_link(keepalive="ok", last_sent=time.time(), display=display["mode"], payload=payload.decode("ascii"),
                           message=f"Keep-alive a cada 2 s; área larga: {labels[display['mode']]} {drawn}")
 
     def _refresh_wide(self, path: str, display: dict[str, Any], metrics: dict[str, int] | None) -> None:
-        """Redraw the DeckForge clock/statistics image when its content changes."""
-        if display["mode"] == "image" or display["renderer"] != "deckforge":
+        """Redraw the DeckForge clock image when the minute changes.
+
+        Statistics are never re-uploaded: the firmware draws their values from
+        the keep-alive, over the background sent once by sync_icons.
+        """
+        from .render import firmware_draws_values
+        if display["mode"] == "image" or display["renderer"] != "deckforge" or firmware_draws_values(display):
             self._wide_key = None
             return
         import json as _json
@@ -374,14 +473,19 @@ class ControlChannel:
                            f"Evento de botão HID com formato desconhecido: {bytes(report[8:12]).hex()}")
                 return
             if not event["pressed"]:
+                self._held.discard(event["slot"])
                 return
             now = time.monotonic()
             if now - self._opened_at < _STALE_REPORT_SECONDS:
                 self.store.log("input", f"Evento HID do slot {event['slot']} descartado: chegou ao reabrir a interface "
                                         "(clique pendente de antes da conexão, não executado)")
                 return
-            if now - self._last_press.get(event["slot"], 0) < .25:
+            # A repeated press report without a release in between is the same
+            # touch. After a release, a quick second press is real (double tap).
+            since = now - self._last_press.get(event["slot"], 0)
+            if since < .05 or (event["slot"] in self._held and since < .25):
                 return
+            self._held.add(event["slot"])
             self._last_press[event["slot"]] = now
             source = "toque na área larga (slot HID 13)" if event["slot"] == 13 else f"evento HID do slot {event['slot']}"
             self.dispatcher.submit(event["key"], source, channel="hid")
@@ -611,9 +715,10 @@ def run_forever(store: ProfileStore, intercept_keyboard: bool | None = None, par
         return stopping.is_set()
 
     store.log("daemon", f"DeckForge daemon iniciado (PID {os.getpid()}, modo {mode}, build {build_id()})")
+    store.reset_page()  # after a boot or restart the dock opens on the home page
     dispatcher = ActionDispatcher(store)
     lcd = LcdSyncWorker(store)
-    dispatcher.on_profile_change = lambda: lcd.request("troca de perfil")
+    dispatcher.on_layout_change = lcd.request
     control = ControlChannel(store, dispatcher)
     try:
         _run_loop(store, intercept_keyboard, should_stop, dispatcher, lcd, control)

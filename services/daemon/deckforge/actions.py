@@ -11,10 +11,10 @@ from .store import DATA_HOME
 
 MEDIA_KEYS = {"playpause", "next", "previous", "stop", "volumeup", "volumedown", "mute"}
 ALLOWED_KEY_NAMES = {"ctrl", "alt", "shift", "super", "tab", "return", "space", "escape", "backspace", "delete", "home", "end", "up", "down", "left", "right", "print", "pageup", "pagedown", "insert", "menu", "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12", *MEDIA_KEYS}
-ACTION_TYPES = {"keys", "app", "command", "text", "multi", "profile", "none"}
+ACTION_TYPES = {"keys", "app", "command", "text", "multi", "profile", "page", "none"}
 _STEP_TYPES = {"keys", "app", "command", "text"}
 _ACTION_FIELDS = {"keys": {"keys"}, "app": {"argv"}, "command": {"argv"}, "text": {"text"}, "multi": {"steps"},
-                  "profile": {"profile"}, "none": set()}
+                  "profile": {"profile"}, "page": {"page"}, "none": set()}
 MAX_TEXT = 1000
 MAX_STEPS = 10
 _SHELLS = {"sh", "bash", "dash", "zsh", "fish", "csh", "tcsh", "ksh"}
@@ -127,6 +127,10 @@ def normalize_action(config: dict[str, Any]) -> dict[str, Any]:
         target = result.get("profile")
         if not isinstance(target, str) or not target or len(target) > 64:
             raise ActionError("Escolha o perfil de destino (ou próximo/anterior).")
+    elif kind == "page":
+        target = result.get("page")
+        if not isinstance(target, str) or not target or len(target) > 64:
+            raise ActionError("Escolha a página de destino (ou voltar, início, próxima, anterior).")
     return result
 
 
@@ -343,7 +347,7 @@ def execute_action(action: dict[str, Any], *, env: Mapping[str, str] | None = No
     """Run one saved action and return what was actually confirmed.
 
     Raises ActionError for every failure, so callers never log a false success.
-    Profile switches need the profile store and are handled by daemon.run_action.
+    Profile and page switches need the profile store and are handled by daemon.run_action.
     """
     kind = action.get("type")
     env = session_environment() if env is None else env

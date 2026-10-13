@@ -46,7 +46,7 @@ def collect_status(store: ProfileStore, events: int = 8) -> dict[str, Any]:
             "keyboard": {"nodes": keyboards, "readable": any(n["readable"] for n in keyboards)},
             "lcd_sync": {"available": bool(write_node), "profile": "D200 2-interface" if write_node else None,
                          "reason": write_reason, "last": lcd_last},
-            "profile": store.active_profile(), "session": environment(), "configured_buttons": len(store.buttons()),
+            "profile": store.active_profile(), "page": store.active_page(), "session": environment(), "configured_buttons": len(store.buttons()),
             "input_capture": capture, "input_backend": input_backend_status(), "daemon": daemon,
             "runtime": runtime_state(store, daemon), "settings": store.settings(), "events": store.recent_events(events)}
 

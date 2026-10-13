@@ -322,6 +322,47 @@ class LcdWorkerTests(unittest.TestCase):
             self.assertEqual(attempts, ["daemon:reconexão"] * 3)
             self.assertIn("o firmware não confirma a renderização", events(store, "sync")[-1]["message"])
 
+    def _worker_across_suspend(self, store, sync):
+        """Start a worker, then advance the suspended-time clock as a 15 min sleep would."""
+        asleep, reads = [0.0], []
+
+        def suspended():
+            value = asleep[0]
+            reads.append(value)
+            return value
+
+        worker = LcdSyncWorker(store, sync=sync, retry_delays=(.01, .01), suspended=suspended)
+        wait_for(lambda: bool(reads))
+        asleep[0] = 900.0
+        return worker
+
+    def test_resume_from_suspend_sends_the_profile_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = make_store(tmp)
+            calls = []
+            worker = self._worker_across_suspend(store, lambda _store, source: calls.append(source) or {"slots": ["0_0"], "frames": 4})
+            try:
+                wait_for(lambda: bool(events(store, "sync")))
+            finally:
+                worker.close()
+            self.assertEqual(calls, ["daemon:retomada após suspensão"])
+            self.assertIn("LCD (retomada após suspensão): 4 quadros", events(store, "sync")[-1]["message"])
+
+    def test_dock_reconnecting_after_resume_is_not_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = make_store(tmp)
+
+            def gone(_store, source):
+                raise FileNotFoundError(2, "No such file or directory")
+
+            worker = self._worker_across_suspend(store, gone)
+            try:
+                wait_for(lambda: bool(events(store, "sync")))
+            finally:
+                worker.close()
+            self.assertIn("será reenviado quando ele reconectar", events(store, "sync")[-1]["message"])
+            self.assertEqual(events(store, "error"), [])
+
     def test_disabled_host_mode_skips_upload(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = make_store(tmp)

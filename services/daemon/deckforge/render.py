@@ -29,6 +29,15 @@ _FONT_CANDIDATES = (
     "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
 )
+_MONO_CANDIDATES = {
+    False: ("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSansMono.ttf", "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf"),
+    True: ("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", "/usr/share/fonts/TTF/DejaVuSansMono-Bold.ttf",
+           "/usr/share/fonts/dejavu/DejaVuSansMono-Bold.ttf", "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf"),
+}
+# Commands typed by the developer clock; one per minute, in turn.
+DEV_SNIPPETS = ('git commit -m "feat: deck"', "npm run dev", "const café = await brew();", "while (vivo) { code(); }",
+                "deckforge sync --lcd", "git push origin main", "docker compose up -d", "python3 -m http.server")
 
 
 def _hex(color: Any, fallback: str) -> tuple[int, int, int]:
@@ -46,6 +55,14 @@ def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         if Path(candidate).is_file():
             return ImageFont.truetype(candidate, size)
     return ImageFont.load_default(size=size)
+
+
+@lru_cache(maxsize=8)
+def _mono(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    for candidate in _MONO_CANDIDATES[bold]:
+        if Path(candidate).is_file():
+            return ImageFont.truetype(candidate, size)
+    return _font(size)
 
 
 def title_position(config: dict[str, Any]) -> str:
@@ -70,12 +87,25 @@ def display_settings(config: dict[str, Any] | None) -> dict[str, Any]:
     return {"mode": display.get("mode") if display.get("mode") in DISPLAY_MODES else "clock",
             "clock_format": "12h" if display.get("clock_format") == "12h" else "24h",
             "renderer": "firmware" if display.get("renderer") == "firmware" else "deckforge",
-            "show_date": display.get("show_date", True) is not False}
+            "show_date": display.get("show_date", True) is not False,
+            # dev: animated code-editor clock (GIF, animated by the firmware itself)
+            "style": "dev" if display.get("style") == "dev" else "classic"}
 
 
 def host_rendered(display: dict[str, Any]) -> bool:
     """True when the wide display shows an image drawn by DeckForge (no firmware branding)."""
     return display["mode"] == "image" or display["renderer"] == "deckforge"
+
+
+def firmware_draws_values(display: dict[str, Any]) -> bool:
+    """True when the firmware draws the live values from the 2 s keep-alive.
+
+    Statistics change every few seconds. Uploading a new image for each change
+    makes the D200 redraw the whole wide display, so the values disappeared and
+    came back. The firmware draws CPU/RAM/GPU itself as a layer over the wide
+    image, so DeckForge uploads only the background, once.
+    """
+    return display["mode"] == "stats" or (display["mode"] == "clock" and display["renderer"] == "firmware")
 
 
 def _paint_background(tile: Image.Image, config: dict[str, Any]) -> bool:
@@ -201,12 +231,14 @@ def _wide_base(config: dict[str, Any]) -> tuple[Image.Image, int]:
         box = 128
         tile.alpha_composite(render_icon(icon, box, resolve_icon_color(icon, config.get("icon_color"))), (16, (height - box) // 2))
         left = 16 + box + 8
-    return tile, left
+    # Opaque RGB so the translucent bar tracks and text shadows drawn next are
+    # blended (ImageDraw on an RGBA image replaces pixels, alpha included).
+    return tile.convert("RGB"), left
 
 
 def _render_clock(config: dict[str, Any], display: dict[str, Any], now: float | None) -> Image.Image:
     tile, left = _wide_base(config)
-    draw = ImageDraw.Draw(tile)
+    draw = ImageDraw.Draw(tile, "RGBA")
     width, height = WIDE_SIZE
     color = _hex(config.get("title_color"), "#ffffff")
     moment = time.localtime(now)
@@ -227,9 +259,72 @@ def _render_clock(config: dict[str, Any], display: dict[str, Any], now: float | 
     return tile
 
 
+def _render_dev_clock(config: dict[str, Any], display: dict[str, Any], now: float | None) -> bytes:
+    """Animated GIF: a code editor showing the time, with a terminal typing a command.
+
+    The D200 firmware plays GIFs by itself, so the animation runs without the
+    host re-uploading frames; the daemon sends a new GIF only when the minute changes.
+    """
+    width, height = WIDE_SIZE
+    background = _hex(config.get("color"), "#0d1117")
+    accent = _hex(config.get("title_color"), "#c5f26b")
+    muted, keyword, name, text = (125, 133, 144), (255, 123, 114), (121, 192, 255), (201, 209, 217)
+    moment = time.localtime(now)
+    clock = time.strftime("%I:%M" if display["clock_format"] == "12h" else "%H:%M", moment)
+    if display["clock_format"] == "12h":
+        clock += " AM" if moment.tm_hour < 12 else " PM"
+    snippet = DEV_SNIPPETS[(moment.tm_hour * 60 + moment.tm_min) % len(DEV_SNIPPETS)]
+    small, code_font = _mono(13), _mono(15)
+    big = _mono(64 if len(clock) <= 5 else 46, bold=True)
+    base = Image.new("RGBA", WIDE_SIZE, background + (255,))
+    if _paint_background(base, config):
+        _shade(base, 150)  # keep the code readable over a photo
+    base = base.convert("RGB")
+
+    def frame(typed: str, cursor: bool) -> Image.Image:
+        tile = base.copy()
+        draw = ImageDraw.Draw(tile, "RGBA")
+        draw.rectangle((0, 0, width, 30), fill=(255, 255, 255, 10))
+        for x, dot in zip((14, 30, 46), ((255, 95, 86), (255, 189, 46), (39, 201, 63))):
+            draw.ellipse((x, 10, x + 10, 20), fill=dot)
+        draw.text((66, 8), "clock.ts", font=small, fill=text)
+        draw.text((width - 14 - draw.textlength("main ●", font=small), 8), "main ●", font=small, fill=muted)
+        for number, y in enumerate((40, 120, 148), 1):
+            draw.text((10, y), str(number), font=small, fill=(72, 79, 88))
+        draw.text((30, 39), "const", font=code_font, fill=keyword)
+        draw.text((30 + draw.textlength("const ", font=code_font), 39), "now", font=code_font, fill=name)
+        draw.text((30 + draw.textlength("const now ", font=code_font), 39), "=", font=code_font, fill=text)
+        draw.text((30, 52), clock, font=big, fill=accent)
+        if display["show_date"]:
+            date = f"// {_WEEKDAYS[moment.tm_wday]} {moment.tm_mday} {_MONTHS[moment.tm_mon - 1]} {moment.tm_year}"
+            draw.text((30, 120), date, font=code_font, fill=muted)
+        prompt = "$ "
+        draw.text((30, 148), prompt, font=code_font, fill=accent)
+        x = 30 + draw.textlength(prompt, font=code_font)
+        draw.text((x, 148), typed, font=code_font, fill=text)
+        if cursor:
+            cx = x + draw.textlength(typed, font=code_font) + 1
+            draw.rectangle((cx, 150, cx + 8, 166), fill=accent)
+        return tile
+
+    steps = [(snippet[:end], True) for end in range(0, len(snippet) + 1, 2)]
+    if steps[-1][0] != snippet:
+        steps.append((snippet, True))
+    holds = [(snippet, index % 2 == 0) for index in range(6)]
+    frames = [frame(typed, cursor) for typed, cursor in steps + holds]
+    durations = [90] * len(steps) + [450] * len(holds)
+    # One palette from the complete frame keeps colours stable and the file small.
+    palette = frames[len(steps) - 1].quantize(colors=64, method=Image.Quantize.MEDIANCUT)
+    indexed = [f.quantize(palette=palette, dither=Image.Dither.NONE) for f in frames]
+    buffer = io.BytesIO()
+    indexed[0].save(buffer, format="GIF", save_all=True, append_images=indexed[1:], duration=durations, loop=0,
+                    optimize=False, disposal=1)
+    return buffer.getvalue()
+
+
 def _render_stats(config: dict[str, Any], metrics: dict[str, int] | None) -> Image.Image:
     tile, left = _wide_base(config)
-    draw = ImageDraw.Draw(tile)
+    draw = ImageDraw.Draw(tile, "RGBA")
     width, height = WIDE_SIZE
     color = _hex(config.get("title_color"), "#ffffff")
     values = metrics or {}
@@ -252,13 +347,25 @@ def _render_stats(config: dict[str, Any], metrics: dict[str, int] | None) -> Ima
     return tile
 
 
-def render_wide(config: dict[str, Any] | None, metrics: dict[str, int] | None = None, now: float | None = None) -> bytes:
-    """PNG for the wide display: custom image, or the DeckForge clock/statistics."""
+def render_wide(config: dict[str, Any] | None, metrics: dict[str, int] | None = None, now: float | None = None,
+                values: bool = True) -> bytes:
+    """PNG for the wide display: custom image, or the DeckForge clock/statistics.
+
+    values=False draws only the background, for modes where the firmware draws
+    the values on top (see firmware_draws_values); the editor preview keeps them.
+    """
     config = config or {}
     display = display_settings(config)
     if display["mode"] == "image" or display["renderer"] == "firmware":
         return render_tile(config, WIDE_SIZE)
-    image = _render_clock(config, display, now) if display["mode"] == "clock" else _render_stats(config, metrics)
+    if not values:
+        image = _wide_base({key: value for key, value in config.items() if key != "icon"})[0]
+    elif display["mode"] == "clock" and display["style"] == "dev":
+        return _render_dev_clock(config, display, now)
+    elif display["mode"] == "clock":
+        image = _render_clock(config, display, now)
+    else:
+        image = _render_stats(config, metrics)
     buffer = io.BytesIO()
     image.convert("RGB").save(buffer, format="PNG", optimize=True)
     return buffer.getvalue()

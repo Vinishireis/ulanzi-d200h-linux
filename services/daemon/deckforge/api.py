@@ -9,10 +9,12 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from . import __version__
 from pydantic import BaseModel, Field, model_validator
 from .actions import ACTION_TYPES, ActionError, execute_action, normalize_action
 from . import icon_library
-from .render import KEY_SIZE, render_tile, render_wide
+from .metrics import SystemMetrics
+from .render import KEY_SIZE, display_settings, render_tile, render_wide
 from .app_catalog import application_icon_png, installed_applications
 from .daemon import run_action
 from .keyboard import MAC_RUN_SLOTS, WINDOWS_RUN_SLOTS
@@ -21,19 +23,28 @@ from .status import collect_status, integrations
 from .store import DATA_HOME, ProfileStore
 
 app = FastAPI(title="DeckForge Linux", version="0.1.0", docs_url=None, redoc_url=None)
+# The hosted editor (Vercel) runs in the user's browser and calls this API on
+# 127.0.0.1. Only these exact origins are accepted, and only after the user
+# allows it locally (setting online_editor). DECKFORGE_HOSTED_ORIGINS
+# (comma-separated) replaces the list, e.g. for a custom domain.
+HOSTED_ORIGINS = frozenset(o.strip().rstrip("/") for o in os.environ.get(
+    "DECKFORGE_HOSTED_ORIGINS", "https://deckforge-d200h.vercel.app").split(",") if o.strip())
 # The Vite editor runs on port 1420 while the local API uses 8765. Its JSON
 # requests trigger browser preflights, which must be answered before routing.
 app.add_middleware(
     CORSMiddleware,
+    allow_origins=sorted(HOSTED_ORIGINS),
     allow_origin_regex=r"^http://(127\.0\.0\.1|localhost)(:(1420|8765))?$",
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type"],
 )
 store = ProfileStore()
+# CPU usage is a delta between samples; one sampler keeps it across preview requests.
+_metrics = SystemMetrics()
 _requests: dict[str, tuple[float, int]] = {}
 
 def _origin_allowed(origin: str) -> bool:
-    if origin == "tauri://localhost": return True
+    if origin == "tauri://localhost" or origin in HOSTED_ORIGINS: return True
     try:
         parts = urlsplit(origin)
         return parts.scheme == "http" and parts.hostname in {"127.0.0.1", "localhost"} and parts.port in {None, 1420, 8765}
@@ -48,6 +59,11 @@ async def local_only(request: Request, call_next):
     origin = request.headers.get("origin")
     if origin and not _origin_allowed(origin):
         return JSONResponse({"detail":"Origem não permitida"}, status_code=403)
+    if origin in HOSTED_ORIGINS and request.method != "OPTIONS" and request.url.path != "/api/hello" \
+            and not store.settings()["online_editor"]:
+        return JSONResponse({"detail": "O editor online ainda não foi permitido neste computador. Rode `deckforge online on` "
+                                       "ou ative em Configurações no editor local (http://127.0.0.1:8765).",
+                             "code": "online_editor_disabled"}, status_code=403)
     # Browser preflights, UI assets and icon thumbnails (a library page shows
     # hundreds) are not API traffic and must not consume the safety budget.
     thumbnail = request.method == "GET" and (request.url.path.startswith("/api/icons/image")
@@ -61,6 +77,9 @@ async def local_only(request: Request, call_next):
             return JSONResponse({"detail":"Limite local da API excedido; tente novamente em alguns segundos."}, status_code=429, headers={"Retry-After": str(retry_after)})
         _requests[client] = (window, count + 1)
     response = await call_next(request)
+    if request.method == "OPTIONS" and request.headers.get("access-control-request-private-network") == "true" and origin:
+        # Chrome's Private Network Access preflight for a public site calling 127.0.0.1.
+        response.headers["Access-Control-Allow-Private-Network"] = "true"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers.setdefault("Cache-Control", "no-store")
     return response
@@ -72,6 +91,7 @@ class DisplayConfig(BaseModel):
     # deckforge: drawn by DeckForge (no Ulanzi branding); firmware: the device's own screen.
     renderer: str = Field(default="deckforge", pattern=r"^(deckforge|firmware)$")
     show_date: bool = True
+    style: str = Field(default="classic", pattern=r"^(classic|dev)$")  # dev: animated code-editor clock
 
 class ButtonConfig(BaseModel):
     type: str
@@ -80,6 +100,7 @@ class ButtonConfig(BaseModel):
     keys: list[str] | None = None
     text: str | None = Field(default=None, max_length=1000)
     profile: str | None = Field(default=None, max_length=64)
+    page: str | None = Field(default=None, max_length=64)
     steps: list[dict] | None = None
     color: str = Field(default="#252936", pattern=r"^#[0-9a-fA-F]{6}$")
     icon: str | None = Field(default=None, max_length=200)
@@ -89,6 +110,7 @@ class ButtonConfig(BaseModel):
     title_position: str | None = Field(default=None, pattern=r"^(none|top|middle|bottom)$")
     title_color: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
     display: DisplayConfig | None = None
+    double_tap: dict | None = None  # wide display only: action for two quick touches
 
     @model_validator(mode="after")
     def validate_action(self):
@@ -101,9 +123,19 @@ class ButtonConfig(BaseModel):
     def stored(self) -> dict:
         """Shape persisted in SQLite: only the fields this action type uses."""
         try:
-            return normalize_action(self.model_dump(exclude_none=True))
+            config = normalize_action(self.model_dump(exclude_none=True))
+            if "double_tap" in config:
+                config["double_tap"] = _double_tap(config["double_tap"])
+            return config
         except ActionError as exc:
             raise HTTPException(422, f"{exc} Teclas aceitas: ctrl, alt, shift, super, tab, return, space, escape, F1–F12, setas, page up/down, mídia (playpause, next, previous, volumeup, volumedown, mute), letras e números.") from exc
+
+_TAP_TYPES = {"keys", "app", "command", "text", "page", "profile", "none"}
+
+def _double_tap(action) -> dict:
+    if not isinstance(action, dict) or action.get("type") not in _TAP_TYPES:
+        raise ActionError("Toque duplo: escolha uma página, um perfil, um atalho, um aplicativo, um comando, um texto ou nada.")
+    return normalize_action({k: v for k, v in action.items() if k in {"type", "keys", "argv", "text", "page", "profile"}})
 
 class ProfileCreate(BaseModel): name: str = Field(min_length=1, max_length=80)
 class SyncRequest(BaseModel): key: str | None = Field(default=None, pattern=r"^[0-2]_[0-4]$")
@@ -112,15 +144,29 @@ class SettingsUpdate(BaseModel):
     host_mode: bool | None = None
     log_keys: bool | None = None
     brightness: int | None = Field(default=None, ge=-1, le=100)
+    online_editor: bool | None = None
 class IconUrl(BaseModel):
     url: str = Field(min_length=8, max_length=2048)
     kind: str = Field(default="icon", pattern=r"^(icon|background)$")
 class TilePreview(BaseModel):
     key: str = Field(default="0_0", pattern=r"^[0-2]_[0-4]$")
     config: ButtonConfig
+class PageCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+    back: bool = True  # put a "Voltar" key on 0_0 so the page is never a dead end
+class PageImport(BaseModel):
+    id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    name: str = Field(min_length=1, max_length=40)
+    buttons: dict[str, ButtonConfig] = {}
 class ProfileImport(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     buttons: dict[str, ButtonConfig]
+    pages: list[PageImport] = Field(default=[], max_length=30)
+
+@app.get("/api/hello")
+def hello():
+    """What the hosted editor asks first: is DeckForge running here, and may it be used?"""
+    return {"app": "deckforge", "version": __version__, "api": 1, "online_editor": store.settings()["online_editor"]}
 
 @app.get("/api/status")
 def status():
@@ -171,9 +217,42 @@ def export_profile(profile_id: str):
 @app.post("/api/profiles/import", status_code=201)
 def import_profile(data: ProfileImport):
     buttons = {key: config.stored() for key, config in data.buttons.items()}
-    try: profile_id = store.import_profile(data.name, buttons)
+    pages = [{"id": page.id, "name": page.name, "buttons": {key: config.stored() for key, config in page.buttons.items()}}
+             for page in data.pages]
+    try: profile_id = store.import_profile(data.name, buttons, pages)
     except ValueError as exc: raise HTTPException(422, str(exc)) from exc
     return {"id": profile_id, "name": data.name}
+
+@app.get("/api/pages")
+def pages():
+    """Pages of the active profile; "active" is the one shown on the device and edited in Meu Deck."""
+    return {"active": store.active_page(), "pages": store.pages()}
+
+@app.post("/api/pages", status_code=201)
+def create_page(data: PageCreate):
+    try: page_id = store.create_page(data.name, back_key=data.back)
+    except ValueError as exc: raise HTTPException(422, str(exc)) from exc
+    return {"id": page_id, "name": data.name.strip()}
+
+@app.patch("/api/pages/{page_id}")
+def rename_page(page_id: str, data: PageCreate):
+    try: store.rename_page(page_id, data.name)
+    except ValueError as exc: raise HTTPException(404, str(exc)) from exc
+    return {"ok": True}
+
+@app.delete("/api/pages/{page_id}")
+def delete_page(page_id: str):
+    try: store.delete_page(page_id)
+    except ValueError as exc: raise HTTPException(409, str(exc)) from exc
+    return {"active": store.active_page()}
+
+@app.post("/api/pages/{page_id}/activate")
+def activate_page(page_id: str):
+    """Show this page on the device (the editor then edits it); the caller resends the icons."""
+    try: page = store.navigate_page(page_id)
+    except ValueError as exc: raise HTTPException(404, str(exc)) from exc
+    store.log("action", f"Página: {page['name']} (aberta pelo editor)")
+    return page
 
 @app.get("/api/settings")
 def get_settings(): return store.settings()
@@ -281,11 +360,15 @@ def render_preview(data: TilePreview):
     """PNG of a key from an unsaved editor config: exactly what the LCD would receive."""
     config = data.config.model_dump(exclude_none=True)
     try:
-        return Response(render_wide(config) if data.key == "2_3" else render_tile(config, KEY_SIZE), media_type="image/png")
+        return _image(render_wide(config) if data.key == "2_3" else render_tile(config, KEY_SIZE))
     except icon_library.IconError as exc:
         raise HTTPException(422, str(exc)) from exc
     except (OSError, RuntimeError, ValueError) as exc:
         raise HTTPException(422, f"Não foi possível renderizar a tecla: {exc}") from exc
+
+def _image(data: bytes) -> Response:
+    """PNG, or the animated GIF of the developer clock (the browser plays it like the LCD)."""
+    return Response(data, media_type="image/gif" if data[:4] == b"GIF8" else "image/png")
 
 @app.get("/api/render/key/{key}.png")
 def render_saved_key(key: str):
@@ -295,7 +378,11 @@ def render_saved_key(key: str):
     if config is None:
         raise HTTPException(404, "Tecla sem configuração.")
     try:
-        return Response(render_wide(config) if key == "2_3" else render_tile(config, KEY_SIZE), media_type="image/png")
+        if key != "2_3":
+            return Response(render_tile(config, KEY_SIZE), media_type="image/png")
+        # Same values the daemon draws on the LCD, not a 0% placeholder.
+        metrics = _metrics.sample() if display_settings(config)["mode"] == "stats" else None
+        return _image(render_wide(config, metrics))
     except (icon_library.IconError, OSError, RuntimeError, ValueError) as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -306,7 +393,8 @@ def buttons(): return store.buttons()
 def update_button(key: str, data: ButtonConfig):
     config = data.stored()
     if key != "2_3":
-        config.pop("display", None)  # only the wide display has a display mode
+        config.pop("display", None)  # only the wide display has a display mode and a double tap
+        config.pop("double_tap", None)
     try: store.save_button(key, config)
     except ValueError as exc: raise HTTPException(422, str(exc)) from exc
     return {"ok": True, "key": key}
@@ -317,16 +405,16 @@ def test_button(key: str, data: TestRequest):
     if key not in store.buttons():
         raise HTTPException(404, f"O botão {key} não tem ação configurada no perfil ativo")
     import threading
-    resync = lambda: threading.Thread(target=_sync_quietly, args=("api:troca de perfil",), daemon=True).start()
+    resync = lambda reason: threading.Thread(target=_sync_quietly, args=(f"api:{reason}",), daemon=True).start()
     if data.delay:
-        threading.Timer(data.delay, run_action, args=(store, key, "teste pelo editor"), kwargs={"on_profile_change": resync}).start()
+        threading.Timer(data.delay, run_action, args=(store, key, "teste pelo editor"), kwargs={"on_layout_change": resync}).start()
         return {"ok": None, "scheduled": True, "message": f"Ação de {key} será executada em {data.delay:g} s; o resultado aparece em Logs."}
-    ok, message = run_action(store, key, "teste pelo editor", on_profile_change=resync)
+    ok, message = run_action(store, key, "teste pelo editor", on_layout_change=resync)
     return {"ok": ok, "scheduled": False, "message": message}
 
 def _sync_quietly(source: str):
     try: sync_icons(store, source=source)
-    except (OSError, RuntimeError, ValueError) as exc: store.log("error", f"LCD não atualizado após trocar de perfil: {exc}")
+    except (OSError, RuntimeError, ValueError) as exc: store.log("error", f"LCD não atualizado após trocar de perfil ou página: {exc}")
 
 @app.delete("/api/buttons/{key}")
 def delete_button(key: str):
@@ -352,7 +440,8 @@ def events(limit: int = 100): return store.recent_events(max(1, min(limit, 1000)
 async def live(ws: WebSocket):
     host = (ws.url.hostname or "").lower()
     origin = ws.headers.get("origin", "")
-    if host not in {"127.0.0.1", "localhost"} or (origin and not _origin_allowed(origin)):
+    if host not in {"127.0.0.1", "localhost"} or (origin and not _origin_allowed(origin)) \
+            or (origin in HOSTED_ORIGINS and not store.settings()["online_editor"]):
         await ws.close(code=1008); return
     await ws.accept()
     # Watch for the close frame concurrently. Polling alone only notices a

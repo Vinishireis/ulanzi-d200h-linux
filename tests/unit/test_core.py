@@ -37,9 +37,18 @@ class ProtocolTests(unittest.TestCase):
         archive = _build_archive({"1_0": ({"icon": "test.svg"}, b"fake-png")})
         with zipfile.ZipFile(io.BytesIO(archive)) as package:
             manifest = json.loads(package.read("manifest.json"))
-            self.assertEqual(manifest["1_0"]["ViewParam"][0]["Icon"], "icons/1_0.png")
-            self.assertEqual(package.read("icons/1_0.png"), b"fake-png")
+            name = manifest["1_0"]["ViewParam"][0]["Icon"]
+            self.assertRegex(name, r"^icons/1_0-[0-9a-f]{12}\.png$")
+            self.assertEqual(package.read(name), b"fake-png")
             self.assertEqual(package.testzip(), None)
+
+    def test_new_image_for_the_same_key_gets_a_new_file_name(self):
+        """The firmware caches images by name; a redrawn clock must not reuse the old one."""
+        def icon_name(png):
+            with zipfile.ZipFile(io.BytesIO(_build_archive({"3_2": ({}, png)}))) as package:
+                return json.loads(package.read("manifest.json"))["3_2"]["ViewParam"][0]["Icon"]
+        self.assertNotEqual(icon_name(b"12:00"), icon_name(b"12:01"))
+        self.assertEqual(icon_name(b"12:00"), icon_name(b"12:00"))
 
     def test_empty_profile_creates_a_valid_snapshot_to_clear_old_icons(self):
         archive = _build_archive({})

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import hashlib
 import io
 import json
 import os
@@ -14,7 +15,8 @@ from typing import Any
 
 from .device import d200_write_target
 from .icon_library import IconError, icon_root
-from .render import display_settings, has_visual, host_rendered, render_tile, render_wide
+from .metrics import SystemMetrics
+from .render import display_settings, firmware_draws_values, has_visual, host_rendered, render_tile, render_wide
 from .session import runtime_dir
 from .store import ProfileStore
 
@@ -36,6 +38,7 @@ HEARTBEAT = 0x0103
 ZIP_ACK = 0x010B
 DEVICE_INFO = 0x0303
 _WRITE_LOCK = Lock()
+_metrics = SystemMetrics()
 
 
 def _icon_root() -> Path:
@@ -62,10 +65,24 @@ def _slot_index(key: str) -> tuple[int, str]:
     return row * 5 + col, f"{col}_{row}"
 
 
+def _icon_name(wire_key: str, png: bytes) -> str:
+    """Archive path that changes whenever the image changes.
+
+    The D200 firmware caches images by file name: new pixels sent under a name
+    it already holds can leave the previous image (or nothing) on the LCD. The
+    wide display is redrawn every few seconds under the same key, so each frame
+    needs a name of its own. The D200 reference (ulanzi-linux) names generated
+    images by content hash for the same reason.
+    """
+    extension = "gif" if png[:4] == b"GIF8" else "png"  # the firmware plays animated GIFs itself
+    return f"icons/{wire_key}-{hashlib.sha256(png).hexdigest()[:12]}.{extension}"
+
+
 def _build_archive(entries: dict[str, tuple[dict[str, Any], bytes]]) -> bytes:
+    names = {wire_key: _icon_name(wire_key, png) for wire_key, (_, png) in entries.items()}
     manifest: dict[str, Any] = {}
-    for wire_key, (config, _) in entries.items():
-        manifest[wire_key] = {"State": 0, "ViewParam": [{"Icon": f"icons/{wire_key}.png"}]}
+    for wire_key in entries:
+        manifest[wire_key] = {"State": 0, "ViewParam": [{"Icon": names[wire_key]}]}
 
     def assemble(padding: int) -> bytes:
         buffer = io.BytesIO()
@@ -75,7 +92,7 @@ def _build_archive(entries: dict[str, tuple[dict[str, Any], bytes]]) -> bytes:
             dummy.compress_type = zipfile.ZIP_STORED
             archive.writestr(dummy, b"A" * padding)
             for wire_key, (_, png) in entries.items():
-                archive.writestr(f"icons/{wire_key}.png", png)
+                archive.writestr(names[wire_key], png)
             sentinel = zipfile.ZipInfo("sentinel.txt")
             sentinel.compress_type = zipfile.ZIP_STORED
             archive.writestr(sentinel, b"")
@@ -130,14 +147,14 @@ def small_window_payload(display: dict[str, str] | None = None, metrics: dict[st
     """SET_SMALL_WINDOW_DATA text `mode|cpu|mem|time|gpu`; it doubles as the host keep-alive.
 
     STATS=0 shows the CPU/RAM/GPU values sent here, CLOCK=1 shows the time sent
-    here, BACKGROUND=2 keeps the host-uploaded image of the wide display.
+    here, BACKGROUND=2 keeps the host-uploaded image of the wide display. The
+    STATS/CLOCK values are drawn over the wide image (firmware_draws_values).
     """
     display = display or display_settings(None)
-    mode = display.get("mode", "clock")
-    if mode == "image" or display.get("renderer", "deckforge") == "deckforge":
-        # BACKGROUND keeps the host-drawn image; the firmware clock/stats screens
-        # carry a Ulanzi-branded background.
+    if not firmware_draws_values({"mode": "clock", "renderer": "deckforge", **display}):
+        # BACKGROUND keeps the image DeckForge drew (custom image or clock).
         return b"2|0|0|00:00:00|0"
+    mode = display.get("mode", "clock")
     stamp = time.strftime("%I:%M:%S" if display.get("clock_format") == "12h" else "%H:%M:%S", time.localtime(now))
     if mode == "stats":
         m = metrics or {}
@@ -282,7 +299,8 @@ def _sync_icons(store: ProfileStore, key: str | None) -> dict[str, Any]:
         # update after the full snapshot, as the D200 reference does. The
         # daemon refreshes the clock/statistics image while it runs.
         try:
-            wide_png = render_wide(wide)
+            # Statistics: only the background; the firmware draws the values on top.
+            wide_png = render_wide(wide, values=not firmware_draws_values(display))
         except IconError as exc:
             raise ValueError(str(exc)) from exc
         wide_blob = _build_archive({WIDE_WIRE_KEY: (wide, wide_png)})
@@ -314,7 +332,8 @@ def _sync_icons(store: ProfileStore, key: str | None) -> dict[str, Any]:
             try:
                 fd = os.open(path, os.O_WRONLY | os.O_CLOEXEC)
                 try:
-                    _write_all(fd, clock_frame(display=display))  # apply the display mode now
+                    stats = _metrics.sample() if display["mode"] == "stats" else None
+                    _write_all(fd, clock_frame(display=display, metrics=stats))  # apply the display mode now
                 finally:
                     os.close(fd)
             except OSError:

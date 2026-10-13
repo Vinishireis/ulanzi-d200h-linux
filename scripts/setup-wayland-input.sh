@@ -28,6 +28,11 @@ if [[ ! -S "$runtime_dir/bus" ]]; then
 fi
 
 apt-get install -y ydotool
+# uinput é carregado sob demanda. Até algum processo root carregá-lo (ex.: o
+# bluetoothd ao conectar um fone), /dev/uinput é o nó estático root:input sem a
+# ACL do usuário e o ydotoold falha em loop desde o login. Carregue no boot.
+echo uinput >/etc/modules-load.d/deckforge-uinput.conf
+modprobe uinput
 install -m 0644 "$project_dir/installers/udev/70-deckforge-uinput.rules" \
   /etc/udev/rules.d/70-deckforge-uinput.rules
 udevadm control --reload-rules

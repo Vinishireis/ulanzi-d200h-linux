@@ -37,6 +37,22 @@ elif [[ "${XDG_SESSION_TYPE:-}" == "wayland" ]] && ! command -v wtype >/dev/null
   echo "AVISO: atalhos globais em Wayland precisam de wtype ou ydotool." >&2
 fi
 
+sync_icons() {
+  echo "Reenviando todos os ícones gravados no perfil ativo ao LCD..."
+  curl -fsS --max-time 30 -X POST -H 'Content-Type: application/json' -d '{}' \
+    http://127.0.0.1:8765/api/sync/icons
+  echo
+}
+
+if systemctl --user is-enabled --quiet deckforge.service 2>/dev/null; then
+  # Inicialização automática ativa: o serviço continua rodando depois deste script.
+  "$deckforge_bin" restart
+  sync_icons
+  echo "Reparo concluído. Editor: http://127.0.0.1:8765"
+  echo "Logs: deckforge logs -f e journalctl --user -u deckforge.service -f"
+  exit 0
+fi
+
 echo "Iniciando API e daemon..."
 "$deckforge_bin" serve >>"$log_dir/server.log" 2>&1 </dev/null &
 server_pid=$!
@@ -68,10 +84,7 @@ if [[ "$ready" != 1 ]]; then
   exit 1
 fi
 
-echo "Reenviando todos os ícones gravados no perfil ativo ao LCD..."
-curl -fsS --max-time 30 -X POST -H 'Content-Type: application/json' -d '{}' \
-  http://127.0.0.1:8765/api/sync/icons
-echo
+sync_icons
 echo "Reparo concluído. Editor: http://127.0.0.1:8765"
 echo "Logs: $log_dir/server.log e $log_dir/daemon.log"
 echo "O DeckForge ficará ativo neste terminal; Ctrl+C encerra API e daemon."
