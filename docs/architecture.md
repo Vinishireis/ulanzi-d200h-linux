@@ -8,14 +8,14 @@
   - laço principal: redescobre o D200H a cada conexão, abre e isola o teclado e só então pede o envio ao LCD (nenhuma macro vaza para o desktop durante o envio);
   - `ControlChannel`: lê a interface HID 0 (eventos de botão `0x0101`, `DEVICE_INFO` `0x0303`, heartbeat) e envia o keep-alive de relógio `0x0006` a cada 2 s;
   - `ActionDispatcher`: fila e thread de execução; o leitor nunca bloqueia esperando uma ação. Um clique informado pelos dois canais (HID e macro) em até 2 s executa uma única vez;
-  - `LcdSyncWorker`: envio em segundo plano, com novas tentativas após reconexão;
+  - `LcdSyncWorker`: envio em segundo plano, com novas tentativas após reconexão e reenvio ao voltar da suspensão (diferença entre `CLOCK_BOOTTIME` e `CLOCK_MONOTONIC`);
   - sai ao receber SIGTERM/SIGINT/SIGHUP ou quando o processo pai (`deckforge serve`) deixa de existir.
 - `actions.py`: ações tipadas (`keys`, `app`, `command`) por argv, sem shell. Atalhos: ydotool (GNOME Wayland, socket do `deckforge-ydotoold`), wtype (outros Wayland), xdotool (X11); falha ou timeout libera todas as teclas. Aplicativos: o código de saída é observado por 1,5 s.
 - `session.py`: ambiente da sessão gráfica (com fallback para o ambiente do systemd do usuário), diretório de runtime e escolha do backend de atalhos.
 - `lcd_sync.py`: renderiza os ícones, monta o ZIP e envia relógio → drenagem → ZIP → espera do ACK `0x010B`, sob um `flock` compartilhado entre API e daemon para que quadros nunca se intercalem.
-- `store.py`: perfis, botões, eventos, estado em tempo real (`state`) e configurações (`settings`) em SQLite.
+- `store.py`: perfis, páginas, botões, eventos, estado em tempo real (`state`) e configurações (`settings`) em SQLite. Cada perfil guarda a página exibida (`profiles.page`) e o histórico do “Voltar”; `buttons()` e `save_button()` agem sobre essa página, e a área larga `2_3` fica sempre na página `home`. Bancos anteriores às páginas são migrados: as teclas viram a página Início.
 - `status.py`: estado combinado para a API e `deckforge status`; estado publicado por um daemon que não está mais vivo nunca é mostrado como ativo.
-- `processes.py` e `cli.py`: ciclo de vida (`serve`, `stop`, `restart`), verificação de porta e lock, SIGTERM→SIGKILL.
+- `processes.py` e `cli.py`: ciclo de vida (`serve`, `stop`, `restart`), verificação de porta e lock, SIGTERM→SIGKILL. Com `installers/systemd/deckforge.service` habilitado (`scripts/enable-autostart.sh`), o systemd do usuário roda `deckforge serve` a partir de `graphical-session.target`; `restart` reinicia esse serviço e `stop` o para antes de encerrar processos.
 - `api.py`: API local (somente loopback) e WebSocket `/api/live`, que encerra assim que o cliente desconecta.
 - `apps/desktop`: editor React/TypeScript servido pela própria API (`apps/desktop/dist`).
 
